@@ -8,6 +8,7 @@ require_once __DIR__ . '/lib/core.php';
 require_once __DIR__ . '/lib/recipes.php';
 require_once __DIR__ . '/lib/shopping.php';
 require_once __DIR__ . '/lib/notes_tags.php';
+require_once __DIR__ . '/lib/paste_import.php';
 
 ini_set('display_errors', '0');
 header('Content-Type: application/json; charset=utf-8');
@@ -1093,6 +1094,62 @@ try {
       respond(['ok' => true, 'canManage' => in_array($role, ['owner', 'editor'], true),
         'tags' => array_map(fn($r) => ['id' => (int)$r['id'], 'name' => $r['name'], 'scope' => $r['scope'], 'count' => (int)$r['n']], $rows),
         'unused' => array_map(fn($r) => ['id' => (int)$r['id'], 'name' => $r['name']], $unused)]);
+    }
+
+    // ---- Paste-a-recipe import (ARCHITECTURE.md §7.1) ----------------------------
+    // The reader runs in the browser; the server keeps the original text, what the reader made
+    // of it, and what was finally saved, so nothing pasted is ever lost.
+
+    // "You may already have this": recipes the user can see with a similar title or most of
+    // the same ingredients.
+    case 'similarRecipes': {
+      requirePost();
+      $b = body();
+      $cookbookId = isset($b['cookbookId']) && $b['cookbookId'] !== '' ? (int)$b['cookbookId'] : null;
+      respond(['ok' => true, 'matches' => similarRecipes($uid, (string)($b['title'] ?? ''), (array)($b['ingredients'] ?? []), $cookbookId)]);
+    }
+
+    case 'importRecipe': {
+      requirePost();
+      $b = body();
+      $cookbookId = intParam($b, 'cookbookId');
+      requireCookbookRole($uid, $cookbookId, ['owner', 'editor']);
+      $raw = importRawText($b);
+      $clean = cleanRecipeInput((array)($b['recipe'] ?? []));
+      db()->begin_transaction();
+      $id = createRecipe($uid, $cookbookId, $clean, 'Imported from pasted text');
+      recordImport($uid, $id, $raw, $b, 'created', $clean);
+      db()->commit();
+      respond(['ok' => true, 'id' => $id]);
+    }
+
+    // The pasted recipe was already there: add that one to the cookbook instead (no copy).
+    case 'importLinkExisting': {
+      requirePost();
+      $b = body();
+      $cookbookId = intParam($b, 'cookbookId');
+      $recipeId = intParam($b, 'recipeId');
+      requireCookbookRole($uid, $cookbookId, ['owner', 'editor']);
+      requireViewRecipe($uid, $recipeId);
+      $raw = importRawText($b);
+      db()->begin_transaction();
+      exec_('INSERT IGNORE INTO sft_cookbook_recipes (cookbook_id, recipe_id, added_by) VALUES (?, ?, ?)', 'iii', [$cookbookId, $recipeId, $uid]);
+      recordImport($uid, $recipeId, $raw, $b, 'linked_existing', null);
+      db()->commit();
+      respond(['ok' => true]);
+    }
+
+    // The original pasted text of a recipe, for anyone who can see the recipe.
+    case 'recipeImport': {
+      $id = intParam($_GET, 'id');
+      requireViewRecipe($uid, $id);
+      $row = q1("SELECT i.raw_text, i.imported_at, i.parser_version, u.id AS uid, u.username, u.display_name
+                   FROM sft_recipe_imports i JOIN users u ON u.id = i.imported_by
+                  WHERE i.recipe_id = ? AND i.outcome = 'created' AND i.parser_version LIKE 'paste%' ORDER BY i.id DESC LIMIT 1", 'i', [$id]);
+      respond(['ok' => true, 'import' => $row ? [
+        'text' => $row['raw_text'], 'importedAt' => $row['imported_at'], 'parser' => $row['parser_version'],
+        'by' => publicUser(['id' => $row['uid'], 'username' => $row['username'], 'display_name' => $row['display_name']]),
+      ] : null]);
     }
 
     // ---- Admin -------------------------------------------------------------

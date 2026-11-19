@@ -106,6 +106,7 @@ function render() {
         <span class="muted">${recipes.length} recipe${recipes.length === 1 ? '' : 's'} · You're ${book.role === 'owner' ? 'an owner' : `a${book.role === 'editor' ? 'n editor' : ' viewer'}`}${book.archived ? ' · Archived' : ''}</span></div>
       <span class="spacer"></span>
       ${canEdit() ? `<a class="btn" href="recipe-edit.html?cookbook=${bookId}">+ New recipe</a>
+        <a class="btn" href="import.html?cookbook=${bookId}">📋 Paste a recipe</a>
         <button type="button" class="btn secondary" id="link-btn">Add existing recipe</button>` : ''}
       <a class="btn secondary" href="share.html?type=cookbook&id=${bookId}">${book.role === 'owner' ? 'Share' : 'People'}</a>
       ${book.role === 'owner' ? '<button type="button" class="btn secondary" id="settings-btn">Settings</button>' : ''}

@@ -17,7 +17,7 @@ async function newPage(viewport, token) {
   page.on('console', m => { if (m.type() === 'error' && !m.text().startsWith('Failed to load resource')) { consoleErrors.push(`${page.url()}: ${m.text()}`); } });
   page.on('pageerror', e => consoleErrors.push(`${page.url()}: ${e.message}`));
   page.on('response', r => { if (r.status() === 404 && !r.url().includes('/api/')) { notFound.push(r.url()); } });
-  page.on('dialog', d => d.accept());
+  page.on('dialog', d => d.accept().catch(() => { /* page already moved on */ }));
   if (token) {
     await page.goto(`${BASE}/index.html?token=${token}`);
   }
@@ -130,7 +130,7 @@ await step('history lists versions and restores one', async () => {
   await desk.locator('[data-view]').last().click();
   await desk.getByText('½ Tbsp chili powder').waitFor();
   await desk.locator('[data-restore]').last().click();
-  await desk.getByText('Restored version 1').waitFor();
+  await desk.locator('.people').getByText('Restored version 1').waitFor();
   await desk.screenshot({ path: `${SHOTS}/6-history.png`, fullPage: true });
 });
 

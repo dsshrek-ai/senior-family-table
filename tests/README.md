@@ -1,10 +1,12 @@
 # Tests
 
-Four suites, all run against a local copy of the site and a **fresh** test database each time.
+Six suites. `parser.test.mjs` needs nothing but Node; the rest run against a local copy of the site and a **fresh** test database each time.
 
 | File | What it checks |
 | ---- | -------------- |
-| `api.test.mjs` | 84 HTTP tests: sign-in, app access, every permission rule (ARCHITECTURE.md §3), cookbook sharing, the recipe editor (in-place rows, conflicts), history and restore, recipe sharing, linking, search, favorites, delete/restore, saved scale, shopping lists (combining rules, serving/batch scale, "have it", remove/rebuild, stores, compare-and-set edits, live changes, sharing, copies), family notes (private never leaks, search visibility, moderation), tags (who may set each kind, tidy names, no duplicates, rename/delete), and the Senior Family import. |
+| `parser.test.mjs` | 17 tests of the paste-a-recipe reader: headings, sections, two cooking methods, wrapped and titled steps, no-heading recipes, website copies, package sizes, ranges, fractions, "to taste", optional, flags instead of guesses. Run: `node tests/parser.test.mjs`. |
+| `api.test.mjs` | 88 HTTP tests: sign-in, app access, every permission rule (ARCHITECTURE.md §3), cookbook sharing, the recipe editor (in-place rows, conflicts), history and restore, recipe sharing, linking, search, favorites, delete/restore, saved scale, shopping lists (combining rules, serving/batch scale, "have it", remove/rebuild, stores, compare-and-set edits, live changes, sharing, copies), family notes (private never leaks, search visibility, moderation), tags (who may set each kind, tidy names, no duplicates, rename/delete), paste import (duplicate suggestions, saved text, linking instead of copying), and the Senior Family import. |
+| `ui-import.mjs` | 8 browser steps: paste survives a reload, the filled-in review screen with flags and original text, clearing a flag, saving (both methods, original text in History), "you may already have this" → add that one instead, "Type it in myself", phone layout. |
 | `ui-notes.mjs` | 9 browser steps: shared and private notes across two people, editing and removing notes, built-in/cookbook/personal tags with find-or-add, a viewer's limits, filtering a cookbook by several tags, renaming a tag, Send as PDF (checks the PDF's text, and that private notes are absent), phone layout. |
 | `ui-lists.mjs` | 12 browser steps: scaling and remembered amounts, the add-to-list panel, adding several recipes from a cookbook, edit mode (stepper, department, store, notes, hand-added items), zero = not needed, shopping mode and Checked Off, by-store view, a second phone seeing a check within seconds, typing never overwritten by another device's change, rebuild, mark as done. |
 | `ui-walkthrough.mjs` | 16 browser steps in headless Edge: sign-in, cookbooks, filtering, favorites, recipe page, editor (save, field errors, two-person conflict), history restore, new recipe with a cooking method, adding to a second cookbook, sharing, a viewer's view, search, and phone layout (no sideways scrolling). Fails on any console error or missing file. |
@@ -40,5 +42,5 @@ BASE_URL=http://127.0.0.1:8100 node tests/ui-walkthrough.mjs ./screenshots
 
 Each walkthrough needs its own fresh database.
 
-Last run 2026-11-19 (MariaDB 11.4, PHP 8.3, Edge): API 84/84; recipe walkthrough 16/16;
-lists walkthrough 12/12; notes walkthrough 9/9; no console errors.
+Last run 2026-11-19 (MariaDB 11.4, PHP 8.3, Edge): parser 17/17; API 88/88; recipe walkthrough 16/16;
+lists 12/12; notes 9/9; import 8/8; no console errors.

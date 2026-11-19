@@ -18,6 +18,7 @@ let recipe = null;
 let revisions = [];
 let openId = null;
 let openSnapshot = null;
+let pasted = null;   // original pasted text, if the recipe came from "Paste a recipe"
 
 function snapshotHtml(s) {
   const methodName = id => (s.methods.find(m => m.id === id) || {}).name;
@@ -40,7 +41,10 @@ function render() {
       <button type="button" class="btn small secondary" data-view="${v.id}" aria-expanded="${openId === v.id}">${openId === v.id ? 'Hide' : 'View'}</button>
       ${recipe.canEdit && v.version !== recipe.version ? `<button type="button" class="btn small" data-restore="${v.id}">Restore</button>` : ''}
       ${openId === v.id && openSnapshot ? `<div style="flex-basis:100%">${snapshotHtml(openSnapshot)}</div>` : ''}
-    </li>`).join('')}</ul></div>`;
+    </li>`).join('')}</ul></div>
+    ${pasted ? `<details class="card" id="pasted"><summary>Original pasted text</summary>
+      <p class="muted" style="margin:8px 0 4px">Pasted by ${escapeHtml(pasted.by.name)} · ${formatDateTime(pasted.importedAt)}</p>
+      <pre style="white-space:pre-wrap;font:inherit;font-size:0.92rem;margin:0">${escapeHtml(pasted.text)}</pre></details>` : ''}`;
 
   main.querySelectorAll('[data-view]').forEach(b => b.addEventListener('click', async () => {
     const vid = Number(b.dataset.view);
@@ -64,9 +68,11 @@ function render() {
 }
 
 async function load() {
-  const [r, h] = await Promise.all([apiGet('getRecipe', { id: recipeId }), apiGet('recipeRevisions', { id: recipeId })]);
+  const [r, h, imp] = await Promise.all([apiGet('getRecipe', { id: recipeId }), apiGet('recipeRevisions', { id: recipeId }),
+    apiGet('recipeImport', { id: recipeId })]);
   recipe = r.recipe;
   revisions = h.revisions;
+  pasted = imp.import;
   document.title = `History: ${recipe.title} | The Senior Family Table`;
   render();
 }

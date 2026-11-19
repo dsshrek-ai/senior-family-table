@@ -17,6 +17,73 @@ const recipeId = Number(param('id')) || null;
 const cookbookId = Number(param('cookbook')) || null;
 let version = null;
 let dirty = false;
+// Reviewing a pasted recipe (import.html → here). The reader's output fills the editor.
+const fromPaste = !recipeId && param('from') === 'paste';
+let paste = null;        // { cookbookId, raw, parsed, version }
+let similar = [];        // recipes the user may already have
+
+function fromParsed(p) {
+  Object.assign(state, {
+    title: p.title, description: p.description, servings: p.servings, yieldQuantity: p.yieldQuantity, yieldUnit: p.yieldUnit,
+    prepMinutes: p.prepMinutes, cookMinutes: p.cookMinutes, totalMinutes: p.totalMinutes, source: p.source, generalNotes: p.generalNotes,
+  });
+  state.ingredients = p.ingredients.map(i => ({ id: null, quantity: i.quantity, quantityMax: i.quantityMax, unit: i.unit, name: i.name,
+    preparation: i.preparation, section: i.section, optional: i.optional, flag: i.flag, line: i.line }));
+  state.methods = p.methods.map(m => ({ id: null, key: m.key, name: m.name }));
+  state.steps = p.steps.map(s => ({ id: null, methodKey: s.methodKey, text: s.text }));
+  if (!state.ingredients.length) { state.ingredients = [blankIngredient(), blankIngredient(), blankIngredient()]; }
+  if (!state.steps.length) { state.steps = [blankStep(), blankStep()]; }
+}
+
+function pasteBanner() {
+  const p = paste.parsed;
+  const lineFlags = state.ingredients.filter(i => i.flag).length;
+  const flags = p ? p.flags : [];
+  return `<div class="banner">
+      ${p ? `<strong>Read from your pasted text — check everything below, then save.</strong>
+        ${lineFlags ? `${lineFlags} ingredient line${lineFlags === 1 ? ' is' : 's are'} marked <span class="badge">Check this</span>.` : ''}
+        ${flags.length ? `<ul style="margin:6px 0 0">${flags.map(f => `<li>${esc(f)}</li>`).join('')}</ul>` : ''}`
+        : '<strong>Type the recipe in below.</strong> Your pasted text is beside you for copying.'}
+    </div>
+    ${similar.length ? `<div class="card" id="similar" style="border-color:var(--accent)">
+      <h2 style="margin-bottom:6px">You may already have this</h2>
+      <ul class="people">${similar.map(m => `<li><span class="who"><a href="recipe.html?id=${m.id}" target="_blank" rel="noopener">${esc(m.title)}</a>
+          <br><span class="muted">${m.reasons.map(esc).join(' · ')}</span></span>
+        ${m.inThisCookbook ? '<span class="pill">Already in this cookbook</span>'
+          : `<button type="button" class="btn small secondary" data-use-existing="${m.id}">Add this one instead</button>`}</li>`).join('')}</ul>
+      <p class="hint" style="margin:6px 0 0">"Add this one instead" puts that recipe in this cookbook — no copy is made. Or keep going to save yours as a new recipe.</p>
+    </div>` : ''}
+    <details class="card" id="original"${window.matchMedia('(min-width: 900px)').matches || !p ? ' open' : ''}>
+      <summary>Your original text</summary>
+      <pre style="white-space:pre-wrap;font:inherit;font-size:0.92rem;margin:8px 0 0;max-height:360px;overflow:auto">${esc(paste.raw)}</pre>
+    </details>`;
+}
+
+function wirePaste() {
+  main.querySelectorAll('[data-use-existing]').forEach(b => b.addEventListener('click', async () => {
+    const m = similar.find(x => x.id === Number(b.dataset.useExisting));
+    if (!confirm(`Add "${m.title}" to this cookbook instead of saving the pasted copy?`)) { return; }
+    try {
+      await apiPost('importLinkExisting', { cookbookId, recipeId: m.id, rawText: paste.raw, parserVersion: paste.version, parsed: paste.parsed });
+      finishPaste();
+      window.location.href = `recipe.html?id=${m.id}&cookbook=${cookbookId}`;
+    } catch (e) { toast(e.message); }
+  }));
+}
+
+// After a successful save: forget the pasted text kept for safety.
+function finishPaste() {
+  dirty = false;
+  try { sessionStorage.removeItem('sftImport'); localStorage.removeItem('sftPasteDraft'); } catch (e) { /* ignore */ }
+}
+
+async function findSimilar() {
+  if (!state.title) { return; }
+  try {
+    similar = (await apiPost('similarRecipes', { title: state.title, cookbookId,
+      ingredients: state.ingredients.map(i => i.name).filter(Boolean) })).matches;
+  } catch (e) { similar = []; }
+}
 let nextKey = 1;
 
 // Editor state. Rows keep their database id so shopping lists and history stay linked.
@@ -67,7 +134,8 @@ function ingredientRow(i, n) {
     </div>
     <div class="field-error" data-for="${f}.quantity" style="grid-column:1/-1"></div>
     <div class="field-error" data-for="${f}.name" style="grid-column:1/-1"></div>
-    <div class="field-error" data-for="${f}.quantityMax" style="grid-column:1/-1"></div></div>`;
+    <div class="field-error" data-for="${f}.quantityMax" style="grid-column:1/-1"></div>
+    ${i.flag ? `<div class="badge" style="grid-column:1/-1;justify-self:start" data-flag>Check this: ${esc(i.flag)}${i.line ? ` — “${esc(i.line)}”` : ''}</div>` : ''}</div>`;
 }
 
 function stepRow(s, n) {
@@ -86,9 +154,10 @@ function stepRow(s, n) {
 
 function render() {
   main.innerHTML = `
-    <p class="no-print"><a href="${recipeId ? `recipe.html?id=${recipeId}${cookbookId ? `&cookbook=${cookbookId}` : ''}` : `cookbook.html?id=${cookbookId}`}" id="back">← Back</a></p>
-    <h1>${recipeId ? 'Edit recipe' : 'New recipe'}</h1>
+    <p class="no-print"><a href="${recipeId ? `recipe.html?id=${recipeId}${cookbookId ? `&cookbook=${cookbookId}` : ''}` : fromPaste ? `import.html?cookbook=${cookbookId}` : `cookbook.html?id=${cookbookId}`}" id="back">← Back</a></p>
+    <h1>${recipeId ? 'Edit recipe' : fromPaste ? 'Check the pasted recipe' : 'New recipe'}</h1>
     <div class="banner hidden" id="conflict" role="alert"></div>
+    ${fromPaste ? pasteBanner() : ''}
     <form id="form" novalidate>
       <div class="card">
         <label for="title">Title</label>
@@ -153,6 +222,7 @@ function wire() {
   const form = document.getElementById('form');
   document.getElementById('cancel').href = document.getElementById('back').href;
   form.querySelectorAll('[data-f]').forEach(el => el.addEventListener('input', () => { state[el.dataset.f] = el.value; dirty = true; }));
+  if (fromPaste) { wirePaste(); }
 
   function wireRows(containerId, list, attr, blank) {
     const box = document.getElementById(containerId);
@@ -163,6 +233,12 @@ function wire() {
         el.addEventListener(ev, () => {
           list[n][el.dataset.k] = el.type === 'checkbox' ? el.checked : el.value;
           dirty = true;
+          // Once someone has looked at and changed a flagged line, the "Check this" mark goes.
+          if (list[n].flag) {
+            list[n].flag = null;
+            const badge = row.querySelector('[data-flag]');
+            if (badge) { badge.remove(); }
+          }
           if (attr === 'm') { refreshStepMethodLabels(); }
         });
       });
@@ -217,6 +293,13 @@ function wire() {
         await apiPost('saveRecipe', { id: recipeId, version, recipe });
         dirty = false;
         window.location.href = `recipe.html?id=${recipeId}${cookbookId ? `&cookbook=${cookbookId}` : ''}`;
+      } else if (fromPaste) {
+        const flags = [...(paste.parsed ? paste.parsed.flags : []),
+          ...(paste.parsed ? paste.parsed.ingredients.filter(i => i.flag).map(i => `${i.line}: ${i.flag}`) : [])];
+        const res = await apiPost('importRecipe', { cookbookId, recipe: { ...recipe, ingredients: recipe.ingredients.map(({ flag, line, ...rest }) => rest) },
+          rawText: paste.raw, parserVersion: paste.version, parsed: paste.parsed, flags });
+        finishPaste();
+        window.location.href = `recipe.html?id=${res.id}&cookbook=${cookbookId}`;
       } else {
         const res = await apiPost('createRecipe', { cookbookId, recipe });
         dirty = false;
@@ -269,8 +352,25 @@ async function load() {
     fromRecipe(res.recipe);
   } else {
     if (!cookbookId) { main.innerHTML = '<div class="card"><p>Open a cookbook first, then choose + New recipe.</p></div>'; return; }
-    state.ingredients = [blankIngredient(), blankIngredient(), blankIngredient()];
-    state.steps = [blankStep(), blankStep()];
+    if (fromPaste) {
+      try { paste = JSON.parse(sessionStorage.getItem('sftImport') || 'null'); } catch (e) { paste = null; }
+      if (!paste || paste.cookbookId !== cookbookId) {
+        main.innerHTML = `<div class="card"><p>The pasted recipe wasn't found — it may have been saved already.</p>
+          <p><a href="import.html?cookbook=${cookbookId}">Paste a recipe</a> · <a href="cookbook.html?id=${cookbookId}">Back to the cookbook</a></p></div>`;
+        return;
+      }
+      if (paste.parsed) {
+        fromParsed(paste.parsed);
+        await findSimilar();
+      } else {
+        state.ingredients = [blankIngredient(), blankIngredient(), blankIngredient()];
+        state.steps = [blankStep(), blankStep()];
+      }
+      // Not "dirty" yet: the pasted text is still kept on the device if they go back.
+    } else {
+      state.ingredients = [blankIngredient(), blankIngredient(), blankIngredient()];
+      state.steps = [blankStep(), blankStep()];
+    }
   }
   render();
   document.getElementById('title').focus();

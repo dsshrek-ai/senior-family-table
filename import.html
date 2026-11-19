@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Paste a recipe | The Senior Family Table</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27%3E%3Ctext y=%27.9em%27 font-size=%2790%27%3E%F0%9F%8D%BD%EF%B8%8F%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main><p class="muted">Loading…</p></main>
+<script src="js/api.js"></script>
+<script src="js/app.js"></script>
+<script src="js/parser.js"></script>
+<script>
+// Paste a whole recipe; the reader (js/parser.js) fills in the editor for review.
+const main = renderShell('');
+const DRAFT_KEY = 'sftPasteDraft';
+const IMPORT_KEY = 'sftImport';
+const readDraft = () => { try { return localStorage.getItem(DRAFT_KEY) || ''; } catch (e) { return ''; } };
+const saveDraft = v => { try { localStorage.setItem(DRAFT_KEY, v); } catch (e) { /* private mode */ } };
+
+async function load() {
+  const books = (await apiGet('listCookbooks')).cookbooks.filter(b => !b.archived && b.role !== 'viewer');
+  const wanted = Number(param('cookbook')) || null;
+  if (!books.length) {
+    main.innerHTML = '<div class="card"><p>You need a cookbook you can add to first.</p><p><a href="index.html">Go to My Cookbooks</a></p></div>';
+    return;
+  }
+  const back = books.some(b => b.id === wanted) ? `cookbook.html?id=${wanted}` : 'index.html';
+  main.innerHTML = `
+    <p><a href="${back}">← Back</a></p>
+    <h1>Paste a recipe</h1>
+    <div class="card">
+      <label for="book" style="margin-top:0">Add it to</label>
+      <select id="book">${books.map(b => `<option value="${b.id}"${b.id === wanted ? ' selected' : ''}>${escapeHtml(b.title)}</option>`).join('')}</select>
+      <label for="text">The whole recipe</label>
+      <textarea id="text" rows="16" placeholder="Copy the recipe from an email, a website, or a document — title, servings, ingredients, steps and notes — and paste it here."></textarea>
+      <p class="hint">Headings like "Ingredients", "Directions", "Instant Pot" or "For serving:" help, but aren't required.
+        Your paste is kept on this device until the recipe is saved.</p>
+      <div class="field-error" id="msg" role="alert"></div>
+      <div class="actions">
+        <button type="button" class="btn" id="read">Read recipe</button>
+        <button type="button" class="btn secondary" id="manual">Type it in myself</button>
+        <button type="button" class="link-btn" id="clear">Clear</button>
+      </div>
+    </div>
+    <div class="card"><h2>What happens next</h2>
+      <p style="margin:0">The recipe opens in the editor with everything filled in. Lines the reader wasn't sure about are marked
+        <span class="badge">Check this</span>, and your original text stays beside it. Nothing is saved until you press Save.
+        If it looks like a recipe you already have, you'll be offered that one instead.</p></div>`;
+
+  const text = document.getElementById('text');
+  text.value = readDraft();
+  text.addEventListener('input', () => saveDraft(text.value));
+  const go = parsed => {
+    const raw = text.value;
+    if (!raw.trim()) { document.getElementById('msg').textContent = 'Paste a recipe first.'; text.focus(); return; }
+    const cookbookId = Number(document.getElementById('book').value);
+    try {
+      sessionStorage.setItem(IMPORT_KEY, JSON.stringify({ cookbookId, raw, parsed, version: PARSER_VERSION }));
+    } catch (e) {
+      document.getElementById('msg').textContent = 'Your browser blocked temporary storage; try again outside a private window.';
+      return;
+    }
+    window.location.href = `recipe-edit.html?cookbook=${cookbookId}&from=paste`;
+  };
+  document.getElementById('read').addEventListener('click', () => go(parseRecipeText(text.value)));
+  document.getElementById('manual').addEventListener('click', () => go(null));
+  document.getElementById('clear').addEventListener('click', () => {
+    if (text.value && !confirm('Clear the pasted text?')) { return; }
+    text.value = '';
+    saveDraft('');
+    text.focus();
+  });
+  if (!text.value) { text.focus(); }
+}
+
+load().catch(e => handleError(main, e));
+</script>
+</body>
+</html>

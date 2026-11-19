@@ -15,7 +15,7 @@ async function newPage(viewport, token) {
   const page = await ctx.newPage();
   page.on('console', m => { if (m.type() === 'error' && !m.text().startsWith('Failed to load resource')) { consoleErrors.push(`${page.url()}: ${m.text()}`); } });
   page.on('pageerror', e => consoleErrors.push(`${page.url()}: ${e.message}`));
-  page.on('dialog', d => d.accept(d.type() === 'prompt' ? (page.nextPrompt || '') : undefined));
+  page.on('dialog', d => d.accept(d.type() === 'prompt' ? (page.nextPrompt || '') : undefined).catch(() => { /* page already moved on */ }));
   if (token) { await page.goto(`${BASE}/index.html?token=${token}`); }
   return page;
 }

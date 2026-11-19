@@ -169,7 +169,7 @@ function ingredientDisplay(array $i): string {
 // ---------------------------------------------------------------------------
 
 /** Creates a recipe, makes $userId its co-owner and links it into $cookbookId. Returns the id. */
-function createRecipe(int $userId, int $cookbookId, array $clean): int {
+function createRecipe(int $userId, int $cookbookId, array $clean, string $note = 'Created'): int {
   $f = $clean['fields'];
   $id = exec_(
     'INSERT INTO sft_recipes (title, title_normalized, description, servings, yield_quantity, yield_unit, prep_minutes,
@@ -183,7 +183,7 @@ function createRecipe(int $userId, int $cookbookId, array $clean): int {
   exec_("INSERT INTO sft_recipe_members (recipe_id, user_id, role, added_by) VALUES (?, ?, 'co_owner', ?)", 'iii', [$id, $userId, $userId]);
   exec_('INSERT INTO sft_cookbook_recipes (cookbook_id, recipe_id, added_by) VALUES (?, ?, ?)', 'iii', [$cookbookId, $id, $userId]);
   writeChildren($id, $clean);
-  writeRevision($id, 1, $userId, 'Created');
+  writeRevision($id, 1, $userId, $note);
   return $id;
 }
 

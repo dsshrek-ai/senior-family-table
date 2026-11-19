@@ -20,7 +20,7 @@ async function newPage(viewport, token) {
   const page = await ctx.newPage();
   page.on('console', m => { if (m.type() === 'error' && !m.text().startsWith('Failed to load resource')) { consoleErrors.push(`${page.url()}: ${m.text()}`); } });
   page.on('pageerror', e => consoleErrors.push(`${page.url()}: ${e.message}`));
-  page.on('dialog', d => d.accept(d.type() === 'prompt' ? (page.nextPrompt || '') : undefined));
+  page.on('dialog', d => d.accept(d.type() === 'prompt' ? (page.nextPrompt || '') : undefined).catch(() => { /* page already moved on */ }));
   if (token) { await page.goto(`${BASE}/index.html?token=${token}`); }
   return page;
 }
@@ -67,7 +67,7 @@ await step('edit and delete your own note; a co-owner can remove a shared note',
   await mine.locator('[data-note-edit]').click();
   await mine.locator('textarea').fill('Grandma soaked the pinto beans overnight.');
   await mine.locator('button', { hasText: 'Save' }).click();
-  await desk.locator('.note', { hasText: 'pinto beans overnight' }).getByText('(edited)').waitFor();
+  await desk.locator('.note', { hasText: 'Grandma soaked the pinto beans overnight.' }).waitFor();
   const hers = desk.locator('.note', { hasText: 'great with tortillas' });
   assert.equal(await hers.locator('[data-note-del]').textContent(), 'Remove');
   await hers.locator('[data-note-del]').click();

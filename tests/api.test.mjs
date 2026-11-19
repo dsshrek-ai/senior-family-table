@@ -771,6 +771,55 @@ await test('tags: filter list for a cookbook, rename, clash, delete', async () =
   assert.ok(!(await call('owner', 'getRecipe', { params: { id: soup } })).data.recipe.tags.some(t => t.name === 'Holiday Dinner'));
 });
 
+// ---- Paste-a-recipe import ------------------------------------------------------------
+
+const PASTE = 'Zucchini Bread\nMakes 2 loaves\n\nIngredients\n3 cups flour\n2 cups grated zucchini\n\nDirections\n1. Mix.\n2. Bake.';
+let pasted = 0;
+await test('import: "you may already have this" by title and by ingredients — only recipes you can see', async () => {
+  const same = (await call('owner', 'similarRecipes', { body: { title: 'Refried Beans with Lard (Instant Pot)', ingredients: [], cookbookId: familyBook } })).data.matches;
+  assert.equal(same[0].id, soup);
+  assert.deepEqual([same[0].reasons, same[0].inThisCookbook], [['Same title'], true]);
+  const similar = (await call('owner', 'similarRecipes', { body: { title: 'Lard Refried Beans', ingredients: [] } })).data.matches;
+  assert.ok(similar.some(m => m.id === soup && m.reasons.includes('Similar title')));
+  const names = (await call('owner', 'getRecipe', { params: { id: soup } })).data.recipe.ingredients.map(i => i.name);
+  const byIng = (await call('owner', 'similarRecipes', { body: { title: 'Totally Different Name', ingredients: names } })).data.matches;
+  assert.ok(byIng.some(m => m.id === soup && m.reasons.some(x => /ingredients match/.test(x))));
+  assert.deepEqual((await call('outsider', 'similarRecipes', { body: { title: 'Refried Beans with Lard (Instant Pot)', ingredients: names } })).data.matches, []);
+});
+await test('import: saves the recipe with the pasted text, reader output and flags', async () => {
+  assert.equal((await call('elaine', 'importRecipe', { body: { cookbookId: familyBook, recipe: { title: 'X' }, rawText: '  ' } })).data.field, 'rawText');
+  const r = await call('elaine', 'importRecipe', { body: { cookbookId: familyBook, rawText: PASTE, parserVersion: 'paste-1',
+    parsed: { title: 'Zucchini Bread' }, flags: ['Servings not found'],
+    recipe: { title: 'Zucchini Bread', yieldQuantity: '2', yieldUnit: 'loaves',
+      ingredients: [{ quantity: '3', unit: 'cups', name: 'flour' }, { quantity: '2', unit: 'cups', name: 'grated zucchini' }],
+      steps: [{ text: 'Mix.' }, { text: 'Bake.' }] } } });
+  assert.equal(r.status, 200);
+  pasted = r.data.id;
+  const got = (await call('elaine', 'getRecipe', { params: { id: pasted } })).data.recipe;
+  assert.deepEqual([got.myRole, got.ingredients.length, got.steps.length], ['co_owner', 2, 2]);
+  const revs = (await call('elaine', 'recipeRevisions', { params: { id: pasted } })).data.revisions;
+  assert.equal(revs[0].note, 'Imported from pasted text');
+  const imp = (await call('owner', 'recipeImport', { params: { id: pasted } })).data.import;
+  assert.equal(imp.text, PASTE);
+  assert.equal(imp.by.name, 'Elaine');
+  const row = sql(`SELECT CONCAT(outcome, '|', parser_version, '|', needs_review IS NOT NULL, '|', corrections IS NOT NULL) FROM sft_recipe_imports WHERE recipe_id = ${pasted}`);
+  assert.equal(row, 'created|paste-1|1|1');
+});
+await test('import: the original text is only for people who can see the recipe', async () => {
+  assert.equal((await call('outsider', 'recipeImport', { params: { id: pasted } })).status, 404);
+  assert.equal((await call('owner', 'recipeImport', { params: { id: soup } })).data.import, null, 'Senior Family imports are not "pasted text"');
+});
+await test('import: "add the one you already have instead" links it, makes no copy, and records it', async () => {
+  const book = (await call('owner', 'createCookbook', { body: { title: 'From Pastes' } })).data.id;
+  const before = Number(sql('SELECT COUNT(*) FROM sft_recipes'));
+  const r = await call('owner', 'importLinkExisting', { body: { cookbookId: book, recipeId: soup, rawText: 'Refried Beans with Lard (Instant Pot)\n…', parserVersion: 'paste-1' } });
+  assert.equal(r.status, 200);
+  assert.equal(Number(sql('SELECT COUNT(*) FROM sft_recipes')), before);
+  assert.ok((await call('owner', 'getRecipe', { params: { id: soup } })).data.recipe.cookbooks.some(c => c.id === book));
+  assert.equal(sql(`SELECT outcome FROM sft_recipe_imports WHERE recipe_id = ${soup} ORDER BY id DESC LIMIT 1`), 'linked_existing');
+  assert.equal((await call('outsider', 'importLinkExisting', { body: { cookbookId: book, recipeId: soup, rawText: 'x' } })).status, 404);
+});
+
 // ---- Admin import ----------------------------------------------------------
 
 await test('only a Hub admin can run the import', async () => {

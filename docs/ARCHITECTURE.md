@@ -299,6 +299,15 @@ contribution is kept in the source rows.
   match offers **Add this existing recipe to the cookbook instead**.
 - If parsing fails, the text is kept and the user lands in the manual editor with it alongside.
 
+**As built (2026-11-19):** `js/parser.js` (version `paste-1`), tested in `tests/parser.test.mjs`
+and against all 190 Senior Family recipes turned back into text (188 read perfectly; the other two
+were a "Serves 4–6" range in the description and notes mixed into the steps — both shown for review).
+The review screen is the normal recipe editor in "check the pasted recipe" mode: flagged lines
+carry a "Check this" mark that clears once the line is edited, the original text sits alongside,
+and "You may already have this" offers recipes with the same or a similar title, or 70%+ of the
+same ingredients. The paste is kept on the device until saved; "Type it in myself" keeps the text
+beside an empty editor. The original pasted text is shown on the recipe's History page.
+
 ### 7.2 Ingredient catalog
 
 - `sft_ingredients` (canonical names, default department, dimension) and
