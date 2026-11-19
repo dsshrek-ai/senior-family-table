@@ -1,6 +1,6 @@
 # Tests
 
-Two suites, both run against a local copy of the site and a **fresh** test database each time.
+Three suites, all run against a local copy of the site and a **fresh** test database each time.
 
 | File | What it checks |
 | ---- | -------------- |
