@@ -1,0 +1,2 @@
+# Vendored libraries must stay byte-for-byte identical (their hashes are recorded).
+js/vendor/*.js -text
