@@ -7,6 +7,7 @@
 
 require_once __DIR__ . '/core.php';
 require_once __DIR__ . '/units.php';
+require_once __DIR__ . '/recipes.php';
 
 const SFC_SOURCE_COLLECTION = 'senior-family';
 const SFC_SOURCE_PREFIX = 'senior-family-cookbook:';
@@ -176,12 +177,18 @@ function mapSeniorFamilyIngredient(string $recipeTitle, int $position, array $in
   if ($unit['prep'] !== null) { $prepParts[] = $unit['prep']; }
   if ($rawNotes !== '') { $prepParts[] = $rawNotes; }
 
-  // "1 cup flour (sifted)" — how the line read in the old app.
+  // "2 cups flour (sifted)" — the line as the old app showed it, except that a plain singular
+  // unit is made plural when the amount is more than one ("2 cup" → "2 cups").
+  $displayUnit = $rawUnit;
+  $singular = normalizeName($rawUnit);
+  if ($singular === $rawUnit && isset(PLURAL_UNITS[$singular])) {
+    $displayUnit = unitLabel($singular, $qty['quantity'], $qty['max']);
+  }
   $display = trim(implode(' ', array_filter([
     $qty['quantity'] !== null
       ? formatQuantity($qty['quantity']) . ($qty['max'] !== null ? '–' . formatQuantity($qty['max']) : '')
       : '',
-    $rawUnit,
+    $displayUnit,
     $name,
   ], fn($p) => $p !== '')));
   if ($rawNotes !== '') { $display .= ' (' . $rawNotes . ')'; }
@@ -335,7 +342,6 @@ function writeImportedRecipe(int $userId, int $cookbookId, array $src, array $ma
   exec_('INSERT INTO sft_cookbook_recipes (cookbook_id, recipe_id, display_order, added_by) VALUES (?, ?, 0, ?)',
     'iii', [$cookbookId, $recipeId, $userId]);
 
-  $snapshotIngredients = [];
   foreach ($mapped['ingredients'] as $ing) {
     $ingredientId = matchCatalogIngredient($userId, $ing['item_name']);
     exec_(
@@ -347,7 +353,6 @@ function writeImportedRecipe(int $userId, int $cookbookId, array $src, array $ma
        $ing['unit_dimension'], $ing['package_qualifier'], $ing['item_name'], $ingredientId, $ing['preparation'],
        $ing['is_optional']]
     );
-    $snapshotIngredients[] = $ing + ['ingredient_id' => $ingredientId];
   }
 
   $number = 0;
@@ -357,7 +362,6 @@ function writeImportedRecipe(int $userId, int $cookbookId, array $src, array $ma
       'iis', [$recipeId, $number, $text]);
   }
 
-  $tagNames = [];
   foreach ($mapped['tags'] as $tag) {
     if ($tag['scope'] === 'system') {
       if (!isset($systemTags[$tag['normalized']])) { continue; }
@@ -367,15 +371,11 @@ function writeImportedRecipe(int $userId, int $cookbookId, array $src, array $ma
     }
     exec_('INSERT IGNORE INTO sft_recipe_categories (recipe_id, category_id, added_by) VALUES (?, ?, ?)',
       'iii', [$recipeId, $categoryId, $userId]);
-    $tagNames[] = $tag['name'] ?? $tag['normalized'];
   }
 
-  $snapshot = json_encode([
-    'recipe' => $r, 'ingredients' => $snapshotIngredients, 'methods' => [],
-    'steps' => $mapped['steps'], 'tags' => $tagNames,
-  ], JSON_UNESCAPED_UNICODE);
-  exec_("INSERT INTO sft_recipe_revisions (recipe_id, version, snapshot, change_note, changed_by) VALUES (?, 1, ?, ?, ?)",
-    'issi', [$recipeId, $snapshot, 'Imported from Senior Family Cookbook #' . $mapped['sourceId'], $userId]);
+  // Same snapshot format as editor saves, so "restore this version" works on imported recipes.
+  writeRevision($recipeId, 1, $userId, 'Imported from Senior Family Cookbook #' . $mapped['sourceId']);
+  $snapshot = json_encode(recipeMaster($recipeId), JSON_UNESCAPED_UNICODE);
 
   exec_(
     "INSERT INTO sft_recipe_imports (recipe_id, raw_text, parser_version, parsed_json, corrections, outcome,

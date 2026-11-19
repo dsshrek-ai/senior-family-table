@@ -7,14 +7,18 @@ synced between devices.
 
 No meal planner, by design.
 
-> **Status:** Foundation phase (design). Nothing is implemented yet.
+> **Status:** Recipe library built and tested locally (cookbooks, recipes, editor, sharing,
+> history, search). Not yet deployed — see [SETUP.md](SETUP.md). Next: import screen, catalog,
+> tags, photos and notes; then scaling and shopping lists.
 
 | File | What it is |
 | ---- | ---------- |
 | [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) | Application specification v1.0 |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Stack, permissions, shopping lists (§6), import, photos, backup |
 | [docs/IMPORT-SENIOR-FAMILY.md](docs/IMPORT-SENIOR-FAMILY.md) | Plan for importing the Senior Family Cookbook recipes (not Living Lean) |
-| [api/schema.sql](api/schema.sql) | Draft `sft_` tables for the MyDataWorld database |
+| [api/schema.sql](api/schema.sql) | `sft_` tables for the MyDataWorld database |
+| [SETUP.md](SETUP.md) | How to put it online |
+| [tests/](tests/README.md) | API and browser tests |
 
 Stack: static HTML + vanilla JS on GitHub Pages; PHP 8 API at
 `seniorfamily.org/senior-family-table-api/`; My Apps Hub sign-in (app key `senior-family-table`).

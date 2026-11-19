@@ -1,10 +1,11 @@
 <?php
-// The Senior Family Table — API (foundation phase).
+// The Senior Family Table — API.
 // Sign-in is My Apps Hub SSO; every action checks the permission rules in lib/core.php
 // (docs/ARCHITECTURE.md §3.2). Guessed IDs always get "not found".
 
 require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/lib/core.php';
+require_once __DIR__ . '/lib/recipes.php';
 
 ini_set('display_errors', '0');
 header('Content-Type: application/json; charset=utf-8');
@@ -96,7 +97,30 @@ function visibleRecipeTags(int $userId, int $recipeId): array {
 // ---------------------------------------------------------------------------
 
 try {
-  $action = (string)($_GET['action'] ?? '');
+  $action = (string)($_GET['action'] ?? body()['action'] ?? '');
+
+  // ---- Sign-in for people who open the app directly instead of from the Hub ----
+  if ($action === 'login') {
+    requirePost();
+    $b = body();
+    $username = trim((string)($b['username'] ?? ''));
+    $password = (string)($b['password'] ?? '');
+    if ($username === '' || $password === '') { fail('Enter your email and password'); }
+    $row = q1('SELECT id, password_hash FROM users WHERE username = ?', 's', [$username]);
+    if (!$row || !password_verify($password, (string)$row['password_hash'])) { fail('Incorrect email or password', 401); }
+    $token = bin2hex(random_bytes(32));
+    $days = defined('SESSION_LIFETIME_DAYS') ? (int)SESSION_LIFETIME_DAYS : 30;
+    exec_('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, DATE_ADD(NOW(), INTERVAL ? DAY))',
+      'sii', [$token, (int)$row['id'], $days]);
+    respond(['ok' => true, 'token' => $token]);
+  }
+  if ($action === 'logout') {
+    requirePost();
+    $token = (string)(body()['token'] ?? '');
+    if ($token !== '') { exec_('DELETE FROM sessions WHERE token = ?', 's', [$token]); }
+    respond(['ok' => true]);
+  }
+
   $user = currentUser();
   $uid = $user['id'];
 
@@ -258,22 +282,16 @@ try {
       respond(['ok' => true]);
     }
 
-    // ---- Recipes (read) ----------------------------------------------------
+    // ---- Recipes -----------------------------------------------------------
 
     case 'getRecipe': {
       $id = intParam($_GET, 'id');
       requireViewRecipe($uid, $id);
-      $r = q1('SELECT * FROM sft_recipes WHERE id = ?', 'i', [$id]);
+      $recipe = recipeMaster($id);
       $role = recipeRole($uid, $id);
-      $ingredients = q(
-        'SELECT id, position, section, original_text, quantity, quantity_max, unit, unit_dimension, package_qualifier,
-                item_name, ingredient_id, preparation, is_optional
-           FROM sft_recipe_ingredients WHERE recipe_id = ? ORDER BY position', 'i', [$id]);
-      $methods = q('SELECT id, method_name, sequence FROM sft_recipe_methods WHERE recipe_id = ? ORDER BY sequence', 'i', [$id]);
-      $steps = q('SELECT id, method_id, step_number, instruction FROM sft_recipe_steps WHERE recipe_id = ? ORDER BY method_id IS NOT NULL, method_id, step_number', 'i', [$id]);
       // Only cookbooks this user belongs to — never reveal the others (§3.2).
       $cookbooks = q(
-        'SELECT c.id, c.title FROM sft_cookbook_recipes cr JOIN sft_cookbooks c ON c.id = cr.cookbook_id AND c.deleted_at IS NULL
+        'SELECT c.id, c.title, m.role FROM sft_cookbook_recipes cr JOIN sft_cookbooks c ON c.id = cr.cookbook_id AND c.deleted_at IS NULL
            JOIN sft_cookbook_members m ON m.cookbook_id = c.id AND m.user_id = ?
           WHERE cr.recipe_id = ? ORDER BY c.title', 'ii', [$uid, $id]);
       // Shared notes, plus this user's own private notes — never anyone else's.
@@ -283,31 +301,13 @@ try {
           WHERE n.recipe_id = ? AND n.deleted_at IS NULL AND (n.visibility = 'shared' OR n.user_id = ?)
           ORDER BY n.created_at", 'ii', [$id, $uid]);
       $state = q1('SELECT is_favorite, rating, tested_approved, saved_scale_mode, saved_scale FROM sft_recipe_user_state WHERE recipe_id = ? AND user_id = ?', 'ii', [$id, $uid]);
+      $updatedBy = q1('SELECT u.id, u.username, u.display_name FROM sft_recipes r JOIN users u ON u.id = r.updated_by WHERE r.id = ?', 'i', [$id]);
 
-      respond(['ok' => true, 'recipe' => [
-        'id' => (int)$r['id'], 'title' => $r['title'], 'description' => $r['description'],
-        'servings' => $r['servings'] !== null ? (float)$r['servings'] : null,
-        'yieldQuantity' => $r['yield_quantity'] !== null ? (float)$r['yield_quantity'] : null, 'yieldUnit' => $r['yield_unit'],
-        'prepMinutes' => $r['prep_minutes'] !== null ? (int)$r['prep_minutes'] : null,
-        'cookMinutes' => $r['cook_minutes'] !== null ? (int)$r['cook_minutes'] : null,
-        'totalMinutes' => $r['total_minutes'] !== null ? (int)$r['total_minutes'] : null,
-        'source' => $r['source_text'], 'generalNotes' => $r['general_notes'], 'version' => (int)$r['version'],
-        'myRole' => $role, 'canEdit' => in_array($role, ['co_owner', 'editor'], true),
-        'ingredients' => array_map(fn($i) => [
-          'id' => (int)$i['id'], 'position' => (int)$i['position'], 'section' => $i['section'], 'text' => $i['original_text'],
-          'quantity' => $i['quantity'] !== null ? (float)$i['quantity'] : null,
-          'quantityMax' => $i['quantity_max'] !== null ? (float)$i['quantity_max'] : null,
-          'unit' => $i['unit'], 'dimension' => $i['unit_dimension'], 'package' => $i['package_qualifier'],
-          'name' => $i['item_name'], 'ingredientId' => $i['ingredient_id'] !== null ? (int)$i['ingredient_id'] : null,
-          'preparation' => $i['preparation'], 'optional' => (bool)$i['is_optional'],
-        ], $ingredients),
-        'methods' => array_map(fn($m) => ['id' => (int)$m['id'], 'name' => $m['method_name']], $methods),
-        'steps' => array_map(fn($s) => [
-          'id' => (int)$s['id'], 'methodId' => $s['method_id'] !== null ? (int)$s['method_id'] : null,
-          'number' => (int)$s['step_number'], 'text' => $s['instruction'],
-        ], $steps),
+      $recipe += [
+        'myRole' => $role, 'canEdit' => in_array($role, ['co_owner', 'editor'], true), 'canManage' => $role === 'co_owner',
+        'updatedBy' => $updatedBy ? publicUser($updatedBy) : null,
         'tags' => visibleRecipeTags($uid, $id),
-        'cookbooks' => array_map(fn($c) => ['id' => (int)$c['id'], 'title' => $c['title']], $cookbooks),
+        'cookbooks' => array_map(fn($c) => ['id' => (int)$c['id'], 'title' => $c['title'], 'role' => $c['role']], $cookbooks),
         'notes' => array_map(fn($n) => [
           'id' => (int)$n['id'], 'visibility' => $n['visibility'], 'text' => $n['note_text'],
           'author' => publicUser(['id' => $n['author_id'], 'username' => $n['username'], 'display_name' => $n['display_name']]),
@@ -320,7 +320,253 @@ try {
           'savedScaleMode' => $state['saved_scale_mode'] ?? null,
           'savedScale' => $state && $state['saved_scale'] !== null ? (float)$state['saved_scale'] : null,
         ],
-      ]]);
+      ];
+      respond(['ok' => true, 'recipe' => $recipe]);
+    }
+
+    // New recipe, created inside a cookbook the user can edit.
+    case 'createRecipe': {
+      requirePost();
+      $b = body();
+      $cookbookId = intParam($b, 'cookbookId');
+      requireCookbookRole($uid, $cookbookId, ['owner', 'editor']);
+      $clean = cleanRecipeInput((array)($b['recipe'] ?? []));
+      db()->begin_transaction();
+      $id = createRecipe($uid, $cookbookId, $clean);
+      db()->commit();
+      respond(['ok' => true, 'id' => $id]);
+    }
+
+    // Save over the master. `version` must be the version the editor loaded; if someone else
+    // saved in between, nothing is written and the caller gets 409 with who and when.
+    case 'saveRecipe': {
+      requirePost();
+      $b = body();
+      $id = intParam($b, 'id');
+      requireViewRecipe($uid, $id);
+      if (!canEditRecipe($uid, $id)) { fail('You can view this recipe but not edit it', 403); }
+      $clean = cleanRecipeInput((array)($b['recipe'] ?? []));
+      db()->begin_transaction();
+      $version = saveRecipe($uid, $id, intParam($b, 'version'), $clean, 'Edited');
+      if ($version === null) {
+        db()->rollback();
+        $cur = q1('SELECT r.version, r.updated_at, u.id, u.username, u.display_name FROM sft_recipes r JOIN users u ON u.id = r.updated_by WHERE r.id = ?', 'i', [$id]);
+        respond(['ok' => false, 'conflict' => true, 'error' => 'Someone else saved this recipe while you were editing.',
+          'currentVersion' => (int)$cur['version'], 'updatedAt' => $cur['updated_at'], 'updatedBy' => publicUser($cur)], 409);
+      }
+      db()->commit();
+      respond(['ok' => true, 'version' => $version]);
+    }
+
+    case 'deleteRecipe': {
+      requirePost();
+      $id = intParam(body(), 'id');
+      requireViewRecipe($uid, $id);
+      if (recipeRole($uid, $id) !== 'co_owner') { fail('Only a co-owner can delete this recipe', 403); }
+      exec_('UPDATE sft_recipes SET deleted_at = NOW(), deleted_by = ? WHERE id = ?', 'ii', [$uid, $id]);
+      audit($uid, 'recipe', $id, 'deleted');
+      respond(['ok' => true]);
+    }
+
+    // Recipes this user co-owns that were deleted in the last 30 days.
+    case 'deletedRecipes': {
+      $rows = q(
+        "SELECT r.id, r.title, r.deleted_at FROM sft_recipes r JOIN sft_recipe_members m ON m.recipe_id = r.id AND m.user_id = ? AND m.role = 'co_owner'
+          WHERE r.deleted_at IS NOT NULL AND r.deleted_at > NOW() - INTERVAL 30 DAY ORDER BY r.deleted_at DESC", 'i', [$uid]);
+      respond(['ok' => true, 'recipes' => array_map(fn($r) => ['id' => (int)$r['id'], 'title' => $r['title'], 'deletedAt' => $r['deleted_at']], $rows)]);
+    }
+
+    case 'restoreRecipe': {
+      requirePost();
+      $id = intParam(body(), 'id');
+      $ok = q1(
+        "SELECT 1 FROM sft_recipes r JOIN sft_recipe_members m ON m.recipe_id = r.id AND m.user_id = ? AND m.role = 'co_owner'
+          WHERE r.id = ? AND r.deleted_at IS NOT NULL AND r.deleted_at > NOW() - INTERVAL 30 DAY", 'ii', [$uid, $id]);
+      if (!$ok) { notFound('Deleted recipe'); }
+      exec_('UPDATE sft_recipes SET deleted_at = NULL, deleted_by = NULL WHERE id = ?', 'i', [$id]);
+      audit($uid, 'recipe', $id, 'restored');
+      respond(['ok' => true]);
+    }
+
+    // ---- Revisions ---------------------------------------------------------
+
+    case 'recipeRevisions': {
+      $id = intParam($_GET, 'id');
+      requireViewRecipe($uid, $id);
+      $rows = q(
+        'SELECT v.id, v.version, v.change_note, v.changed_at, u.id AS uid, u.username, u.display_name
+           FROM sft_recipe_revisions v JOIN users u ON u.id = v.changed_by WHERE v.recipe_id = ? ORDER BY v.version DESC', 'i', [$id]);
+      respond(['ok' => true, 'revisions' => array_map(fn($r) => [
+        'id' => (int)$r['id'], 'version' => (int)$r['version'], 'note' => $r['change_note'], 'changedAt' => $r['changed_at'],
+        'changedBy' => publicUser(['id' => $r['uid'], 'username' => $r['username'], 'display_name' => $r['display_name']]),
+      ], $rows)]);
+    }
+
+    case 'getRevision': {
+      $id = intParam($_GET, 'id');
+      requireViewRecipe($uid, $id);
+      $row = q1('SELECT version, snapshot FROM sft_recipe_revisions WHERE recipe_id = ? AND id = ?', 'ii', [$id, intParam($_GET, 'revisionId')]);
+      if (!$row) { notFound('Version'); }
+      respond(['ok' => true, 'version' => (int)$row['version'], 'snapshot' => json_decode($row['snapshot'], true)]);
+    }
+
+    // Restoring = saving that snapshot as a new version. History is never rewritten.
+    case 'restoreRevision': {
+      requirePost();
+      $b = body();
+      $id = intParam($b, 'id');
+      requireViewRecipe($uid, $id);
+      if (!canEditRecipe($uid, $id)) { fail('You can view this recipe but not edit it', 403); }
+      $row = q1('SELECT version, snapshot FROM sft_recipe_revisions WHERE recipe_id = ? AND id = ?', 'ii', [$id, intParam($b, 'revisionId')]);
+      if (!$row) { notFound('Version'); }
+      $clean = cleanRecipeInput(snapshotToInput((array)json_decode($row['snapshot'], true)));
+      db()->begin_transaction();
+      $version = saveRecipe($uid, $id, intParam($b, 'version'), $clean, 'Restored version ' . $row['version']);
+      if ($version === null) {
+        db()->rollback();
+        fail('Someone else saved this recipe just now. Reload and try again.', 409);
+      }
+      audit($uid, 'recipe', $id, 'revision_restored', 'version ' . $row['version']);
+      db()->commit();
+      respond(['ok' => true, 'version' => $version]);
+    }
+
+    // ---- Recipes in cookbooks ----------------------------------------------
+
+    // Add a recipe the user can already see into one of their cookbooks (no copy is made).
+    case 'linkRecipe': {
+      requirePost();
+      $b = body();
+      $cookbookId = intParam($b, 'cookbookId');
+      $recipeId = intParam($b, 'recipeId');
+      requireCookbookRole($uid, $cookbookId, ['owner', 'editor']);
+      requireViewRecipe($uid, $recipeId);
+      exec_('INSERT IGNORE INTO sft_cookbook_recipes (cookbook_id, recipe_id, added_by) VALUES (?, ?, ?)', 'iii', [$cookbookId, $recipeId, $uid]);
+      respond(['ok' => true]);
+    }
+
+    // Remove from one cookbook only; the recipe and its other cookbooks are untouched.
+    case 'unlinkRecipe': {
+      requirePost();
+      $b = body();
+      $cookbookId = intParam($b, 'cookbookId');
+      $recipeId = intParam($b, 'recipeId');
+      requireCookbookRole($uid, $cookbookId, ['owner', 'editor']);
+      exec_('DELETE FROM sft_cookbook_recipes WHERE cookbook_id = ? AND recipe_id = ?', 'ii', [$cookbookId, $recipeId]);
+      respond(['ok' => true]);
+    }
+
+    // Search every recipe the user can see (or one cookbook): title, ingredients, visible tags.
+    case 'searchRecipes': {
+      $term = trim((string)($_GET['q'] ?? ''));
+      $cookbookId = isset($_GET['cookbookId']) && $_GET['cookbookId'] !== '' ? intParam($_GET, 'cookbookId') : null;
+      if ($cookbookId !== null) { requireCookbookRole($uid, $cookbookId, ['owner', 'editor', 'viewer']); }
+      $favoritesOnly = !empty($_GET['favorites']);
+      $like = '%' . str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], mb_strtolower($term)) . '%';
+      $sql = 'SELECT r.id, r.title, r.description, r.servings,
+                     (SELECT us.is_favorite FROM sft_recipe_user_state us WHERE us.recipe_id = r.id AND us.user_id = ?) AS fav
+                FROM sft_recipes r WHERE ' . VISIBLE_RECIPE_SQL;
+      $types = 'iii';
+      $params = [$uid, $uid, $uid];
+      if ($term !== '') {
+        $sql .= " AND (LOWER(r.title) LIKE ? OR EXISTS (SELECT 1 FROM sft_recipe_ingredients i WHERE i.recipe_id = r.id AND LOWER(i.item_name) LIKE ?)
+                  OR EXISTS (SELECT 1 FROM sft_recipe_categories rc JOIN sft_categories c ON c.id = rc.category_id
+                              WHERE rc.recipe_id = r.id AND LOWER(c.name) LIKE ? AND (c.scope = 'system'
+                                OR (c.scope = 'user' AND c.owner_user_id = ?)
+                                OR (c.scope = 'cookbook' AND EXISTS (SELECT 1 FROM sft_cookbook_members m WHERE m.cookbook_id = c.cookbook_id AND m.user_id = ?)))))";
+        $types .= 'sssii';
+        array_push($params, $like, $like, $like, $uid, $uid);
+      }
+      if ($cookbookId !== null) {
+        $sql .= ' AND EXISTS (SELECT 1 FROM sft_cookbook_recipes x WHERE x.recipe_id = r.id AND x.cookbook_id = ?)';
+        $types .= 'i';
+        $params[] = $cookbookId;
+      }
+      if ($favoritesOnly) {
+        $sql .= ' AND EXISTS (SELECT 1 FROM sft_recipe_user_state f WHERE f.recipe_id = r.id AND f.user_id = ? AND f.is_favorite = 1)';
+        $types .= 'i';
+        $params[] = $uid;
+      }
+      $sql .= ' ORDER BY r.title LIMIT 200';
+      $rows = q($sql, $types, $params);
+      respond(['ok' => true, 'recipes' => array_map(fn($r) => [
+        'id' => (int)$r['id'], 'title' => $r['title'], 'description' => $r['description'],
+        'servings' => $r['servings'] !== null ? (float)$r['servings'] : null, 'favorite' => (bool)$r['fav'],
+      ], $rows)]);
+    }
+
+    case 'setFavorite': {
+      requirePost();
+      $b = body();
+      $id = intParam($b, 'recipeId');
+      requireViewRecipe($uid, $id);
+      $fav = !empty($b['favorite']) ? 1 : 0;
+      exec_('INSERT INTO sft_recipe_user_state (recipe_id, user_id, is_favorite) VALUES (?, ?, ?)
+             ON DUPLICATE KEY UPDATE is_favorite = VALUES(is_favorite)', 'iii', [$id, $uid, $fav]);
+      respond(['ok' => true, 'favorite' => (bool)$fav]);
+    }
+
+    // ---- Recipe sharing (co-owners, editors, viewers) -----------------------
+
+    case 'recipeMembers': {
+      $id = intParam($_GET, 'id');
+      requireViewRecipe($uid, $id);
+      $rows = q(
+        "SELECT u.id, u.username, u.display_name, m.role FROM sft_recipe_members m JOIN users u ON u.id = m.user_id
+          WHERE m.recipe_id = ? ORDER BY FIELD(m.role, 'co_owner', 'editor', 'viewer'), u.display_name", 'i', [$id]);
+      respond(['ok' => true, 'members' => array_map(fn($r) => publicUser($r) + ['role' => $r['role']], $rows)]);
+    }
+
+    case 'addRecipeMember': {
+      requirePost();
+      $b = body();
+      $id = intParam($b, 'recipeId');
+      requireViewRecipe($uid, $id);
+      if (recipeRole($uid, $id) !== 'co_owner') { fail('Only a co-owner can share this recipe', 403); }
+      $role = roleParam($b, ['co_owner', 'editor', 'viewer']);
+      $invitee = userByUsername((string)($b['username'] ?? ''));
+      if (!$invitee) { fail('No My Apps Hub account uses that username. They need to sign up on the Hub first.', 404, 'username'); }
+      $inviteeId = (int)$invitee['id'];
+      if (recipeRole($inviteeId, $id) !== null) { fail('They already have a role on this recipe', 409, 'username'); }
+      exec_('INSERT INTO sft_recipe_members (recipe_id, user_id, role, added_by) VALUES (?, ?, ?, ?)', 'iisi', [$id, $inviteeId, $role, $uid]);
+      grantAppAccess($inviteeId);
+      audit($uid, 'recipe', $id, 'member_added', "user $inviteeId as $role");
+      respond(['ok' => true, 'member' => publicUser($invitee) + ['role' => $role]]);
+    }
+
+    case 'setRecipeMemberRole': {
+      requirePost();
+      $b = body();
+      $id = intParam($b, 'recipeId');
+      $memberId = intParam($b, 'userId');
+      requireViewRecipe($uid, $id);
+      if (recipeRole($uid, $id) !== 'co_owner') { fail('Only a co-owner can change roles', 403); }
+      $role = roleParam($b, ['co_owner', 'editor', 'viewer']);
+      $current = recipeRole($memberId, $id);
+      if ($current === null) { notFound('Member'); }
+      if ($current === 'co_owner' && $role !== 'co_owner' && ownerCount('sft_recipe_members', 'recipe_id', $id, 'co_owner') <= 1) {
+        fail('A recipe needs at least one co-owner. Make someone else a co-owner first.', 409);
+      }
+      exec_('UPDATE sft_recipe_members SET role = ? WHERE recipe_id = ? AND user_id = ?', 'sii', [$role, $id, $memberId]);
+      audit($uid, 'recipe', $id, 'role_changed', "user $memberId: $current → $role");
+      respond(['ok' => true]);
+    }
+
+    case 'removeRecipeMember': {
+      requirePost();
+      $b = body();
+      $id = intParam($b, 'recipeId');
+      $memberId = intParam($b, 'userId');
+      requireViewRecipe($uid, $id);
+      if ($memberId !== $uid && recipeRole($uid, $id) !== 'co_owner') { fail('Only a co-owner can remove people', 403); }
+      $current = recipeRole($memberId, $id);
+      if ($current === null) { notFound('Member'); }
+      if ($current === 'co_owner' && ownerCount('sft_recipe_members', 'recipe_id', $id, 'co_owner') <= 1) {
+        fail('A recipe needs at least one co-owner. Make someone else a co-owner first, or delete the recipe.', 409);
+      }
+      exec_('DELETE FROM sft_recipe_members WHERE recipe_id = ? AND user_id = ?', 'ii', [$id, $memberId]);
+      audit($uid, 'recipe', $id, $memberId === $uid ? 'member_left' : 'member_removed', "user $memberId ($current)");
+      respond(['ok' => true]);
     }
 
     // ---- Admin -------------------------------------------------------------

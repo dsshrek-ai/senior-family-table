@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Edit recipe | The Senior Family Table</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27%3E%3Ctext y=%27.9em%27 font-size=%2790%27%3E%F0%9F%8D%BD%EF%B8%8F%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main><p class="muted">Loading…</p></main>
+<script src="js/api.js"></script>
+<script src="js/app.js"></script>
+<script>
+const main = renderShell('');
+const recipeId = Number(param('id')) || null;
+const cookbookId = Number(param('cookbook')) || null;
+let version = null;
+let dirty = false;
+let nextKey = 1;
+
+// Editor state. Rows keep their database id so shopping lists and history stay linked.
+const state = {
+  title: '', description: '', servings: '', yieldQuantity: '', yieldUnit: '',
+  prepMinutes: '', cookMinutes: '', totalMinutes: '', source: '', generalNotes: '',
+  ingredients: [], methods: [], steps: [],
+};
+
+const blankIngredient = () => ({ id: null, quantity: '', unit: '', name: '', preparation: '', section: '', optional: false });
+const blankStep = () => ({ id: null, methodKey: '', text: '' });
+
+function fromRecipe(r) {
+  Object.assign(state, {
+    title: r.title, description: r.description || '', servings: quantityToInput(r.servings),
+    yieldQuantity: quantityToInput(r.yieldQuantity), yieldUnit: r.yieldUnit || '',
+    prepMinutes: r.prepMinutes ?? '', cookMinutes: r.cookMinutes ?? '', totalMinutes: r.totalMinutes ?? '',
+    source: r.source || '', generalNotes: r.generalNotes || '',
+  });
+  state.ingredients = r.ingredients.map(i => ({
+    id: i.id, quantity: quantityToInput(i.quantity), quantityMax: quantityToInput(i.quantityMax),
+    unit: (i.unit || '') + (i.dimension === 'package' && i.package ? ` (${i.package})` : ''),
+    name: i.name, preparation: i.preparation || '', section: i.section || '', optional: i.optional,
+  }));
+  state.methods = r.methods.map(m => ({ id: m.id, key: `m${m.id}`, name: m.name }));
+  state.steps = r.steps.map(s => ({ id: s.id, methodKey: s.methodId ? `m${s.methodId}` : '', text: s.text }));
+}
+
+const esc = escapeHtml;
+const val = v => esc(v === null || v === undefined ? '' : String(v));
+
+function ingredientRow(i, n) {
+  const f = `ingredients.${n}`;
+  return `<div class="ing-row" data-i="${n}">
+    <div><input type="text" inputmode="decimal" placeholder="Amt" aria-label="Amount, row ${n + 1}" data-k="quantity" data-field="${f}.quantity" value="${val(i.quantity)}"></div>
+    <input type="text" placeholder="Unit" aria-label="Unit, row ${n + 1}" data-k="unit" data-field="${f}.unit" value="${val(i.unit)}">
+    <input type="text" placeholder="Ingredient" aria-label="Ingredient, row ${n + 1}" data-k="name" data-field="${f}.name" value="${val(i.name)}">
+    <input type="text" class="prep" placeholder="Preparation (chopped, softened…)" aria-label="Preparation, row ${n + 1}" data-k="preparation" data-field="${f}.preparation" value="${val(i.preparation)}">
+    <div class="extras">
+      <label class="check"><input type="checkbox" data-k="optional"${i.optional ? ' checked' : ''}> Optional</label>
+      <input type="text" placeholder="Up to" title="Upper amount, for a range like 2–3" aria-label="Upper amount for a range, row ${n + 1}" data-k="quantityMax" data-field="${f}.quantityMax" value="${val(i.quantityMax)}" style="max-width:90px;min-width:70px;flex:0">
+      <input type="text" placeholder="Section (e.g. For serving)" aria-label="Section, row ${n + 1}" data-k="section" data-field="${f}.section" value="${val(i.section)}">
+      <div class="row-tools">
+        <button type="button" data-move="-1" aria-label="Move row ${n + 1} up">↑</button>
+        <button type="button" data-move="1" aria-label="Move row ${n + 1} down">↓</button>
+        <button type="button" data-remove aria-label="Remove row ${n + 1}">✕</button>
+      </div>
+    </div>
+    <div class="field-error" data-for="${f}.quantity" style="grid-column:1/-1"></div>
+    <div class="field-error" data-for="${f}.name" style="grid-column:1/-1"></div>
+    <div class="field-error" data-for="${f}.quantityMax" style="grid-column:1/-1"></div></div>`;
+}
+
+function stepRow(s, n) {
+  const methodOptions = state.methods.length
+    ? `<select data-k="methodKey" aria-label="Cooking method for step ${n + 1}" style="margin-bottom:6px">
+        <option value="">Every method</option>${state.methods.map(m => `<option value="${esc(m.key)}"${m.key === s.methodKey ? ' selected' : ''}>${esc(m.name || 'Unnamed method')} only</option>`).join('')}</select>` : '';
+  return `<div class="step-row" data-s="${n}"><div class="num">${n + 1}</div>
+    <div>${methodOptions}<textarea aria-label="Step ${n + 1}" data-k="text" data-field="steps.${n}.text" rows="2">${esc(s.text)}</textarea>
+      <div class="field-error" data-for="steps.${n}.text"></div></div>
+    <div class="row-tools">
+      <button type="button" data-move="-1" aria-label="Move step ${n + 1} up">↑</button>
+      <button type="button" data-move="1" aria-label="Move step ${n + 1} down">↓</button>
+      <button type="button" data-remove aria-label="Remove step ${n + 1}">✕</button>
+    </div></div>`;
+}
+
+function render() {
+  main.innerHTML = `
+    <p class="no-print"><a href="${recipeId ? `recipe.html?id=${recipeId}${cookbookId ? `&cookbook=${cookbookId}` : ''}` : `cookbook.html?id=${cookbookId}`}" id="back">← Back</a></p>
+    <h1>${recipeId ? 'Edit recipe' : 'New recipe'}</h1>
+    <div class="banner hidden" id="conflict" role="alert"></div>
+    <form id="form" novalidate>
+      <div class="card">
+        <label for="title">Title</label>
+        <input type="text" id="title" data-f="title" data-field="title" maxlength="200" value="${val(state.title)}">
+        <div class="field-error" data-for="title"></div>
+        <label for="description">About this recipe <span class="muted">(story, who makes it, where it came from)</span></label>
+        <textarea id="description" data-f="description" data-field="description">${esc(state.description)}</textarea>
+        <div class="two-col">
+          <div><label for="servings">Servings</label><input type="text" inputmode="decimal" id="servings" data-f="servings" data-field="servings" value="${val(state.servings)}">
+            <div class="field-error" data-for="servings"></div></div>
+          <div><label for="source">Source <span class="muted">(optional)</span></label><input type="text" id="source" data-f="source" data-field="source" value="${val(state.source)}"></div>
+        </div>
+        <div class="two-col">
+          <div><label for="yq">Batch makes <span class="muted">(optional)</span></label><input type="text" inputmode="decimal" id="yq" data-f="yieldQuantity" data-field="yieldQuantity" placeholder="1" value="${val(state.yieldQuantity)}">
+            <div class="field-error" data-for="yieldQuantity"></div></div>
+          <div><label for="yu">&nbsp;</label><input type="text" id="yu" data-f="yieldUnit" data-field="yieldUnit" placeholder="pan, loaf, dozen cookies" value="${val(state.yieldUnit)}" aria-label="Batch unit"></div>
+        </div>
+        <div class="three-col">
+          <div><label for="pm">Prep (min)</label><input type="number" min="0" id="pm" data-f="prepMinutes" data-field="prepMinutes" value="${val(state.prepMinutes)}"></div>
+          <div><label for="cm">Cook (min)</label><input type="number" min="0" id="cm" data-f="cookMinutes" data-field="cookMinutes" value="${val(state.cookMinutes)}"></div>
+          <div><label for="tm">Total (min)</label><input type="number" min="0" id="tm" data-f="totalMinutes" data-field="totalMinutes" value="${val(state.totalMinutes)}"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Ingredients</h2>
+        <p class="hint">Amounts can be written like 2, 1.5, 1 1/2 or ½. Leave the amount blank for "to taste".</p>
+        <div class="row-list" id="ings">${state.ingredients.map(ingredientRow).join('')}</div>
+        <div class="actions"><button type="button" class="btn secondary" id="add-ing">+ Add ingredient</button></div>
+      </div>
+
+      <div class="card">
+        <h2>Cooking methods <span class="muted" style="font-size:1rem">(optional)</span></h2>
+        <p class="hint">Add these only when a recipe has different steps for, say, Instant Pot and Slow Cooker. Steps marked "Every method" apply to all.</p>
+        <div class="row-list" id="methods">${state.methods.map((m, n) => `<div class="toolbar" style="margin:0" data-m="${n}">
+          <input type="text" data-k="name" data-field="methods.${n}.name" aria-label="Method ${n + 1} name" placeholder="e.g. Instant Pot" value="${val(m.name)}" style="flex:1">
+          <button type="button" class="btn small secondary" data-remove aria-label="Remove method ${n + 1}">Remove</button></div>`).join('')}</div>
+        <div class="actions"><button type="button" class="btn secondary" id="add-method">+ Add cooking method</button></div>
+      </div>
+
+      <div class="card">
+        <h2>Steps</h2>
+        <div class="row-list" id="steps">${state.steps.map(stepRow).join('')}</div>
+        <div class="actions"><button type="button" class="btn secondary" id="add-step">+ Add step</button></div>
+      </div>
+
+      <div class="card">
+        <label for="notes" style="margin-top:0">Recipe notes <span class="muted">(storage, garnish, variations)</span></label>
+        <textarea id="notes" data-f="generalNotes" data-field="generalNotes">${esc(state.generalNotes)}</textarea>
+      </div>
+
+      <div class="sticky-save">
+        <div class="field-error" id="msg" role="alert"></div>
+        <div class="actions" style="margin-top:4px"><button type="submit" class="btn" id="save">${recipeId ? 'Save changes' : 'Save recipe'}</button>
+          <a class="btn secondary" href="#" id="cancel">Cancel</a></div>
+      </div>
+    </form>`;
+  wire();
+}
+
+function wire() {
+  const form = document.getElementById('form');
+  document.getElementById('cancel').href = document.getElementById('back').href;
+  form.querySelectorAll('[data-f]').forEach(el => el.addEventListener('input', () => { state[el.dataset.f] = el.value; dirty = true; }));
+
+  function wireRows(containerId, list, attr, blank) {
+    const box = document.getElementById(containerId);
+    box.querySelectorAll(`[data-${attr}]`).forEach(row => {
+      const n = Number(row.dataset[attr]);
+      row.querySelectorAll('[data-k]').forEach(el => {
+        const ev = el.type === 'checkbox' || el.tagName === 'SELECT' ? 'change' : 'input';
+        el.addEventListener(ev, () => {
+          list[n][el.dataset.k] = el.type === 'checkbox' ? el.checked : el.value;
+          dirty = true;
+          if (attr === 'm') { refreshStepMethodLabels(); }
+        });
+      });
+      const rm = row.querySelector('[data-remove]');
+      if (rm) {
+        rm.addEventListener('click', () => {
+          const removed = list.splice(n, 1)[0];
+          if (attr === 'm') { state.steps.forEach(s => { if (s.methodKey === removed.key) { s.methodKey = ''; } }); }
+          dirty = true;
+          render();
+        });
+      }
+      row.querySelectorAll('[data-move]').forEach(b => b.addEventListener('click', () => {
+        const to = n + Number(b.dataset.move);
+        if (to < 0 || to >= list.length) { return; }
+        [list[n], list[to]] = [list[to], list[n]];
+        dirty = true;
+        render();
+        const again = document.querySelector(`#${containerId} [data-${attr}="${to}"] [data-move="${b.dataset.move}"]`);
+        if (again) { again.focus(); }
+      }));
+    });
+    return box;
+  }
+  wireRows('ings', state.ingredients, 'i');
+  wireRows('methods', state.methods, 'm');
+  wireRows('steps', state.steps, 's');
+
+  function addRow(list, item, containerId, attr) {
+    list.push(item);
+    dirty = true;
+    render();
+    const last = document.querySelector(`#${containerId} [data-${attr}="${list.length - 1}"] input[type="text"], #${containerId} [data-${attr}="${list.length - 1}"] textarea`);
+    if (last) { last.focus(); }
+  }
+  document.getElementById('add-ing').addEventListener('click', () => addRow(state.ingredients, blankIngredient(), 'ings', 'i'));
+  document.getElementById('add-step').addEventListener('click', () => addRow(state.steps, blankStep(), 'steps', 's'));
+  document.getElementById('add-method').addEventListener('click', () => addRow(state.methods, { id: null, key: `n${nextKey++}`, name: '' }, 'methods', 'm'));
+
+  form.addEventListener('submit', async ev => {
+    ev.preventDefault();
+    const btn = document.getElementById('save');
+    const msg = document.getElementById('msg');
+    msg.textContent = '';
+    btn.disabled = true;
+    const recipe = {
+      ...state,
+      ingredients: state.ingredients.map(i => ({ ...i, quantityMax: i.quantityMax || null })),
+    };
+    try {
+      if (recipeId) {
+        await apiPost('saveRecipe', { id: recipeId, version, recipe });
+        dirty = false;
+        window.location.href = `recipe.html?id=${recipeId}${cookbookId ? `&cookbook=${cookbookId}` : ''}`;
+      } else {
+        const res = await apiPost('createRecipe', { cookbookId, recipe });
+        dirty = false;
+        window.location.href = `recipe.html?id=${res.id}&cookbook=${cookbookId}`;
+      }
+    } catch (e) {
+      btn.disabled = false;
+      if (e.status === 409 && e.data && e.data.conflict) {
+        const box = document.getElementById('conflict');
+        box.classList.remove('hidden');
+        box.innerHTML = `<strong>${esc(e.data.updatedBy.name)} saved this recipe ${formatDateTime(e.data.updatedAt)}, while you were editing.</strong>
+          Your changes were <em>not</em> saved, so nothing of theirs was lost.
+          <a href="recipe.html?id=${recipeId}" target="_blank" rel="noopener">Open their version in a new tab</a> to compare, then
+          <button type="button" class="link-btn" id="reload-latest">load their version here</button> and redo your changes.`;
+        document.getElementById('reload-latest').addEventListener('click', async () => {
+          if (!confirm('Replace what you typed with their latest version?')) { return; }
+          dirty = false;
+          await load();
+          toast('Loaded the latest version');
+        });
+        box.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        return;
+      }
+      showFieldError(form, e, msg);
+    }
+  });
+}
+
+// Keep the "… only" choices on each step in sync while a method is being renamed.
+function refreshStepMethodLabels() {
+  document.querySelectorAll('#steps select[data-k="methodKey"] option').forEach(opt => {
+    const m = state.methods.find(x => x.key === opt.value);
+    if (m) { opt.textContent = `${m.name || 'Unnamed method'} only`; }
+  });
+}
+
+window.addEventListener('beforeunload', ev => {
+  if (dirty) { ev.preventDefault(); ev.returnValue = ''; }
+});
+
+async function load() {
+  if (recipeId) {
+    const res = await apiGet('getRecipe', { id: recipeId });
+    if (!res.recipe.canEdit) {
+      main.innerHTML = `<div class="card"><p>You can view this recipe but not edit it. A co-owner can make you an editor.</p>
+        <p><a href="recipe.html?id=${recipeId}">Back to the recipe</a></p></div>`;
+      return;
+    }
+    version = res.recipe.version;
+    fromRecipe(res.recipe);
+  } else {
+    if (!cookbookId) { main.innerHTML = '<div class="card"><p>Open a cookbook first, then choose + New recipe.</p></div>'; return; }
+    state.ingredients = [blankIngredient(), blankIngredient(), blankIngredient()];
+    state.steps = [blankStep(), blankStep()];
+  }
+  render();
+  document.getElementById('title').focus();
+}
+
+load().catch(e => handleError(main, e));
+</script>
+</body>
+</html>

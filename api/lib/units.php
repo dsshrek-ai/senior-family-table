@@ -204,6 +204,23 @@ function parseQuantityText(string $text): ?float {
   return null;
 }
 
+// Units that read better in the plural ("2 cups", "3 cloves"); abbreviations (tsp, oz, lb) never change.
+const PLURAL_UNITS = [
+  'cup' => 'cups', 'pint' => 'pints', 'quart' => 'quarts', 'gallon' => 'gallons', 'liter' => 'liters',
+  'can' => 'cans', 'package' => 'packages', 'bottle' => 'bottles', 'box' => 'boxes', 'bag' => 'bags', 'jar' => 'jars',
+  'envelope' => 'envelopes', 'tub' => 'tubs', 'container' => 'containers', 'clove' => 'cloves', 'slice' => 'slices',
+  'stalk' => 'stalks', 'rib' => 'ribs', 'head' => 'heads', 'bunch' => 'bunches', 'sprig' => 'sprigs', 'sheet' => 'sheets',
+  'rack' => 'racks', 'stick' => 'sticks', 'strip' => 'strips', 'scoop' => 'scoops', 'handful' => 'handfuls',
+  'pinch' => 'pinches', 'dash' => 'dashes', 'drop' => 'drops', 'piece' => 'pieces', 'batch' => 'batches',
+  'capful' => 'capfuls', 'lemon' => 'lemons', 'lime' => 'limes',
+];
+
+function unitLabel(?string $unit, ?float $quantity, ?float $quantityMax = null): string {
+  if ($unit === null || $unit === '') { return ''; }
+  $many = ($quantityMax ?? $quantity ?? 0) > 1;
+  return $many && isset(PLURAL_UNITS[$unit]) ? PLURAL_UNITS[$unit] : $unit;
+}
+
 // Friendly display: 0.5 → "½", 1.25 → "1¼", 0.333 → "⅓", 2 → "2", 0.4 → "0.4".
 function formatQuantity(?float $q): string {
   if ($q === null) { return ''; }

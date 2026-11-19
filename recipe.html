@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Recipe | The Senior Family Table</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27%3E%3Ctext y=%27.9em%27 font-size=%2790%27%3E%F0%9F%8D%BD%EF%B8%8F%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main><p class="muted">Loading…</p></main>
+<script src="js/api.js"></script>
+<script src="js/app.js"></script>
+<script>
+const main = renderShell('');
+const recipeId = Number(param('id'));
+const fromCookbook = Number(param('cookbook')) || null;
+let r = null;
+let myBooks = [];
+
+function ingredientList(list) {
+  let html = '';
+  let section = null;
+  for (const i of list) {
+    if ((i.section || null) !== section) {
+      section = i.section || null;
+      if (section) { html += `<li class="section">${escapeHtml(section)}</li>`; }
+    }
+    html += `<li>${escapeHtml(i.text)}${i.optional && !/optional/i.test(i.text) ? ' <span class="opt">(optional)</span>' : ''}</li>`;
+  }
+  return `<ul class="ingredients">${html}</ul>`;
+}
+
+function stepsHtml() {
+  const shared = r.steps.filter(s => s.methodId === null);
+  let html = shared.length ? `<ol class="steps">${shared.map(s => `<li>${escapeHtml(s.text)}</li>`).join('')}</ol>` : '';
+  for (const m of r.methods) {
+    const ms = r.steps.filter(s => s.methodId === m.id);
+    if (!ms.length) { continue; }
+    html += `<h3 style="margin-top:16px">${escapeHtml(m.name)}</h3><ol class="steps">${ms.map(s => `<li>${escapeHtml(s.text)}</li>`).join('')}</ol>`;
+  }
+  return html || '<p class="muted">No steps yet.</p>';
+}
+
+function render() {
+  document.title = `${r.title} | The Senior Family Table`;
+  const facts = [
+    r.servings ? `Serves ${formatQuantity(r.servings)}` : '',
+    r.yieldQuantity ? `Makes ${formatQuantity(r.yieldQuantity)} ${escapeHtml(r.yieldUnit || '')}` : '',
+    r.prepMinutes !== null ? `Prep ${formatMinutes(r.prepMinutes)}` : '',
+    r.cookMinutes !== null ? `Cook ${formatMinutes(r.cookMinutes)}` : '',
+    r.totalMinutes !== null ? `Total ${formatMinutes(r.totalMinutes)}` : '',
+  ].filter(Boolean);
+  const inBooks = new Set(r.cookbooks.map(c => c.id));
+  const addable = myBooks.filter(b => !inBooks.has(b.id) && (b.role === 'owner' || b.role === 'editor'));
+  const back = r.cookbooks.find(c => c.id === fromCookbook) || r.cookbooks[0];
+
+  main.innerHTML = `
+    <p class="no-print">${back ? `<a href="cookbook.html?id=${back.id}">← ${escapeHtml(back.title)}</a>` : '<a href="index.html">← My Cookbooks</a>'}</p>
+    <div class="recipe-head card">
+      <div class="toolbar" style="margin:0">
+        <h1 style="margin:0;flex:1">${escapeHtml(r.title)}</h1>
+        <button type="button" class="icon-btn fav no-print" id="fav" aria-pressed="${r.me.favorite}" aria-label="${r.me.favorite ? 'Remove from favorites' : 'Add to favorites'}">${r.me.favorite ? '★' : '☆'}</button>
+      </div>
+      ${facts.length ? `<div class="facts">${facts.map(f => `<span>${f}</span>`).join('')}</div>` : ''}
+      ${r.tags.length ? `<div>${r.tags.map(t => `<span class="pill">${escapeHtml(t.name)}</span>`).join('')}</div>` : ''}
+      ${r.description ? `<div style="margin-top:12px">${formatText(r.description)}</div>` : ''}
+      <div class="actions no-print">
+        ${r.canEdit ? `<a class="btn" href="recipe-edit.html?id=${r.id}${fromCookbook ? `&cookbook=${fromCookbook}` : ''}">Edit</a>` : ''}
+        <a class="btn secondary" href="share.html?type=recipe&id=${r.id}">${r.canManage ? 'Share' : 'People'}</a>
+        <a class="btn secondary" href="history.html?id=${r.id}">History</a>
+        <button type="button" class="btn secondary" onclick="window.print()">Print</button>
+        ${r.canManage ? '<button type="button" class="btn danger" id="del">Delete</button>' : ''}
+      </div>
+    </div>
+    <div class="recipe-body">
+      <section class="card" aria-labelledby="ing-h"><h2 id="ing-h">Ingredients</h2>
+        ${r.ingredients.length ? ingredientList(r.ingredients) : '<p class="muted">No ingredients yet.</p>'}</section>
+      <section class="card" aria-labelledby="steps-h"><h2 id="steps-h">Steps</h2>${stepsHtml()}</section>
+    </div>
+    ${r.generalNotes ? `<section class="card"><h2>Notes</h2>${formatText(r.generalNotes)}</section>` : ''}
+    ${r.notes.length ? `<section class="card"><h2>Family notes</h2>${r.notes.map(n => `
+      <div class="note${n.visibility === 'private' ? ' private' : ''}">${formatText(n.text)}
+        <div class="by">${escapeHtml(n.author.name)} · ${formatDateTime(n.createdAt)}${n.visibility === 'private' ? ' · Private — only you can see this' : ''}</div></div>`).join('')}</section>` : ''}
+    <section class="card no-print">
+      <p style="margin:0 0 8px">${r.source ? `Source: ${escapeHtml(r.source)}<br>` : ''}
+        In your cookbooks: ${r.cookbooks.length ? r.cookbooks.map(c => `<a href="cookbook.html?id=${c.id}">${escapeHtml(c.title)}</a>`).join(', ') : '<span class="muted">none</span>'}</p>
+      ${addable.length ? `<div class="toolbar" style="margin:0"><label for="add-book" style="margin:0">Also add to</label>
+        <select id="add-book" style="width:auto;flex:1;min-width:160px">${addable.map(b => `<option value="${b.id}">${escapeHtml(b.title)}</option>`).join('')}</select>
+        <button type="button" class="btn small" id="add-book-btn">Add</button></div>` : ''}
+      <p class="muted" style="margin:8px 0 0;font-size:0.9rem">Version ${r.version}${r.updatedBy ? ` · last changed by ${escapeHtml(r.updatedBy.name)} ${formatDateTime(r.updatedAt)}` : ''}</p>
+    </section>`;
+
+  document.getElementById('fav').addEventListener('click', async () => {
+    try {
+      await apiPost('setFavorite', { recipeId: r.id, favorite: !r.me.favorite });
+      r.me.favorite = !r.me.favorite;
+      render();
+    } catch (e) { toast(e.message); }
+  });
+  const addBtn = document.getElementById('add-book-btn');
+  if (addBtn) {
+    addBtn.addEventListener('click', async () => {
+      const id = Number(document.getElementById('add-book').value);
+      try {
+        await apiPost('linkRecipe', { cookbookId: id, recipeId: r.id });
+        toast('Added');
+        await load();
+      } catch (e) { toast(e.message); }
+    });
+  }
+  const del = document.getElementById('del');
+  if (del) {
+    del.addEventListener('click', async () => {
+      if (!confirm(`Delete "${r.title}"?\n\nIt disappears from every cookbook it's in, for everyone. Co-owners can restore it from My Cookbooks for 30 days.`)) { return; }
+      try {
+        await apiPost('deleteRecipe', { id: r.id });
+        window.location.href = back ? `cookbook.html?id=${back.id}` : 'index.html';
+      } catch (e) { toast(e.message); }
+    });
+  }
+}
+
+async function load() {
+  const [rec, books] = await Promise.all([apiGet('getRecipe', { id: recipeId }), apiGet('listCookbooks')]);
+  r = rec.recipe;
+  myBooks = books.cookbooks.filter(b => !b.archived);
+  render();
+}
+
+load().catch(e => handleError(main, e));
+</script>
+</body>
+</html>

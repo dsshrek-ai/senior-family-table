@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cookbook | The Senior Family Table</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27%3E%3Ctext y=%27.9em%27 font-size=%2790%27%3E%F0%9F%8D%BD%EF%B8%8F%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main><p class="muted">Loading…</p></main>
+<script src="js/api.js"></script>
+<script src="js/app.js"></script>
+<script>
+const main = renderShell('');
+const bookId = Number(param('id'));
+let book = null;
+let recipes = [];
+let filterText = '';
+let favoritesOnly = false;
+
+const canEdit = () => book && (book.role === 'owner' || book.role === 'editor');
+
+function shownRecipes() {
+  const t = filterText.trim().toLowerCase();
+  return recipes.filter(r => (!favoritesOnly || r.favorite)
+    && (!t || r.title.toLowerCase().includes(t) || r.tags.some(tag => tag.toLowerCase().includes(t))));
+}
+
+function recipeRows(list) {
+  if (!list.length) {
+    return `<p class="muted">${recipes.length ? 'No recipes match.' : 'No recipes in this cookbook yet.'}</p>`;
+  }
+  return `<ul class="recipe-list">${list.map(r => `
+    <li>
+      <button type="button" class="icon-btn fav" data-fav="${r.id}" aria-pressed="${r.favorite}"
+        aria-label="${r.favorite ? 'Remove from' : 'Add to'} favorites: ${escapeHtml(r.title)}">${r.favorite ? '★' : '☆'}</button>
+      <a href="recipe.html?id=${r.id}&cookbook=${bookId}"><span class="title">${escapeHtml(r.title)}</span>
+        <span class="sub">${r.tags.slice(0, 6).map(escapeHtml).join(' · ')}</span></a>
+      ${canEdit() ? `<button type="button" class="btn small secondary" data-unlink="${r.id}" aria-label="Remove ${escapeHtml(r.title)} from this cookbook">Remove</button>` : ''}
+    </li>`).join('')}</ul>`;
+}
+
+function render() {
+  document.title = `${book.title} | The Senior Family Table`;
+  main.innerHTML = `
+    <p class="no-print"><a href="index.html">← My Cookbooks</a></p>
+    <div class="toolbar">
+      <div><h1 style="margin:0">${escapeHtml(book.title)}</h1>
+        <span class="muted">${recipes.length} recipe${recipes.length === 1 ? '' : 's'} · You're ${book.role === 'owner' ? 'an owner' : `a${book.role === 'editor' ? 'n editor' : ' viewer'}`}${book.archived ? ' · Archived' : ''}</span></div>
+      <span class="spacer"></span>
+      ${canEdit() ? `<a class="btn" href="recipe-edit.html?cookbook=${bookId}">+ New recipe</a>
+        <button type="button" class="btn secondary" id="link-btn">Add existing recipe</button>` : ''}
+      <a class="btn secondary" href="share.html?type=cookbook&id=${bookId}">${book.role === 'owner' ? 'Share' : 'People'}</a>
+      ${book.role === 'owner' ? '<button type="button" class="btn secondary" id="settings-btn">Settings</button>' : ''}
+    </div>
+    ${book.description ? `<p class="muted">${escapeHtml(book.description)}</p>` : ''}
+    <section class="card hidden" id="link-panel" aria-labelledby="link-h">
+      <h2 id="link-h">Add a recipe you already have</h2>
+      <p class="muted">The same recipe can be in several cookbooks — no copy is made, so edits show up everywhere.</p>
+      <label for="link-q">Search your recipes</label>
+      <input type="search" id="link-q" placeholder="Title, ingredient, or tag">
+      <div id="link-results" style="margin-top:8px"></div>
+    </section>
+    <form class="card hidden" id="settings" novalidate>
+      <h2>Cookbook settings</h2>
+      <label for="s-title">Name</label>
+      <input type="text" id="s-title" data-field="title" maxlength="150" value="${escapeHtml(book.title)}">
+      <div class="field-error" data-for="title"></div>
+      <label for="s-desc">Description</label>
+      <input type="text" id="s-desc" data-field="description" maxlength="2000" value="${escapeHtml(book.description || '')}">
+      <label class="check" style="margin-top:12px"><input type="checkbox" id="s-arch"${book.archived ? ' checked' : ''}> Archived (hidden from your main list)</label>
+      <div class="field-error" id="s-msg"></div>
+      <div class="actions"><button type="submit" class="btn">Save</button>
+        <button type="button" class="btn danger" id="s-delete">Delete cookbook</button></div>
+      <p class="hint">Deleting a cookbook never deletes its recipes — they stay in any other cookbook they're in.</p>
+    </form>
+    <div class="toolbar">
+      <input type="search" id="filter" placeholder="Filter by title or tag" value="${escapeHtml(filterText)}" aria-label="Filter recipes" style="flex:1;min-width:180px">
+      <span class="seg"><button type="button" data-favs="0" class="${favoritesOnly ? '' : 'active'}">All</button><button type="button" data-favs="1" class="${favoritesOnly ? 'active' : ''}">★ Favorites</button></span>
+    </div>
+    <div class="card" id="list">${recipeRows(shownRecipes())}</div>`;
+  wire();
+}
+
+function wireList() {
+  const list = document.getElementById('list');
+  list.querySelectorAll('[data-fav]').forEach(b => b.addEventListener('click', async () => {
+    const r = recipes.find(x => x.id === Number(b.dataset.fav));
+    try {
+      await apiPost('setFavorite', { recipeId: r.id, favorite: !r.favorite });
+      r.favorite = !r.favorite;
+      list.innerHTML = recipeRows(shownRecipes());
+      wireList();
+    } catch (e) { toast(e.message); }
+  }));
+  list.querySelectorAll('[data-unlink]').forEach(b => b.addEventListener('click', async () => {
+    const r = recipes.find(x => x.id === Number(b.dataset.unlink));
+    if (!confirm(`Remove "${r.title}" from ${book.title}?\n\nThe recipe itself is not deleted, and it stays in any other cookbook it's in.`)) { return; }
+    try {
+      await apiPost('unlinkRecipe', { cookbookId: bookId, recipeId: r.id });
+      recipes = recipes.filter(x => x !== r);
+      toast('Removed from this cookbook');
+      render();
+    } catch (e) { toast(e.message); }
+  }));
+}
+
+function wire() {
+  wireList();
+  const filter = document.getElementById('filter');
+  filter.addEventListener('input', () => {
+    filterText = filter.value;
+    document.getElementById('list').innerHTML = recipeRows(shownRecipes());
+    wireList();
+  });
+  main.querySelectorAll('[data-favs]').forEach(b => b.addEventListener('click', () => {
+    favoritesOnly = b.dataset.favs === '1';
+    render();
+  }));
+
+  const linkBtn = document.getElementById('link-btn');
+  if (linkBtn) {
+    const panel = document.getElementById('link-panel');
+    const q = document.getElementById('link-q');
+    const out = document.getElementById('link-results');
+    let timer = null;
+    async function search() {
+      try {
+        const res = await apiGet('searchRecipes', { q: q.value });
+        const have = new Set(recipes.map(r => r.id));
+        const found = res.recipes.filter(r => !have.has(r.id)).slice(0, 30);
+        out.innerHTML = found.length ? `<ul class="recipe-list">${found.map(r => `<li><span style="flex:1;padding:10px 4px">${escapeHtml(r.title)}</span>
+          <button type="button" class="btn small" data-add="${r.id}">Add</button></li>`).join('')}</ul>`
+          : '<p class="muted">No other recipes found.</p>';
+        out.querySelectorAll('[data-add]').forEach(b => b.addEventListener('click', async () => {
+          b.disabled = true;
+          try {
+            await apiPost('linkRecipe', { cookbookId: bookId, recipeId: Number(b.dataset.add) });
+            toast('Added to this cookbook');
+            await load();
+          } catch (e) { toast(e.message); b.disabled = false; }
+        }));
+      } catch (e) { out.textContent = e.message; }
+    }
+    linkBtn.addEventListener('click', () => { panel.classList.toggle('hidden'); if (!panel.classList.contains('hidden')) { q.focus(); search(); } });
+    q.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(search, 250); });
+  }
+
+  const settingsBtn = document.getElementById('settings-btn');
+  if (settingsBtn) {
+    const form = document.getElementById('settings');
+    settingsBtn.addEventListener('click', () => form.classList.toggle('hidden'));
+    form.addEventListener('submit', async ev => {
+      ev.preventDefault();
+      try {
+        await apiPost('updateCookbook', { id: bookId, title: document.getElementById('s-title').value,
+          description: document.getElementById('s-desc').value, archived: document.getElementById('s-arch').checked });
+        toast('Saved');
+        await load();
+      } catch (e) { showFieldError(form, e, document.getElementById('s-msg')); }
+    });
+    document.getElementById('s-delete').addEventListener('click', async () => {
+      if (!confirm(`Delete the cookbook "${book.title}"?\n\nIts recipes are not deleted. Everyone you shared it with loses access to it.`)) { return; }
+      try {
+        await apiPost('deleteCookbook', { id: bookId });
+        window.location.href = 'index.html';
+      } catch (e) { toast(e.message); }
+    });
+  }
+}
+
+async function load() {
+  const res = await apiGet('getCookbook', { id: bookId });
+  book = res.cookbook;
+  recipes = res.recipes;
+  render();
+}
+
+load().catch(e => handleError(main, e));
+</script>
+</body>
+</html>

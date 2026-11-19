@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sharing | The Senior Family Table</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27%3E%3Ctext y=%27.9em%27 font-size=%2790%27%3E%F0%9F%8D%BD%EF%B8%8F%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main><p class="muted">Loading…</p></main>
+<script src="js/api.js"></script>
+<script src="js/app.js"></script>
+<script>
+const main = renderShell('');
+const type = param('type') === 'recipe' ? 'recipe' : 'cookbook';
+const id = Number(param('id'));
+let me = null;
+let title = '';
+let canManage = false;
+let members = [];
+
+// Per-type wiring: roles, API actions, and the plain-language explanation.
+const T = type === 'cookbook' ? {
+  roles: ['owner', 'editor', 'viewer'], top: 'owner',
+  list: 'cookbookMembers', add: 'addCookbookMember', setRole: 'setCookbookMemberRole', remove: 'removeCookbookMember',
+  key: 'cookbookId', back: () => `cookbook.html?id=${id}`,
+  help: `<ul>
+    <li><strong>Owner</strong> — rename or delete the cookbook and choose who's in it.</li>
+    <li><strong>Editor</strong> — add and remove recipes in this cookbook.</li>
+    <li><strong>Viewer</strong> — read the cookbook and its recipes.</li></ul>
+    <p class="hint">Sharing a cookbook lets people <em>read</em> its recipes. To let someone change a recipe itself,
+    share that recipe with them as an editor or co-owner. People only ever see the cookbooks they're in.</p>`,
+} : {
+  roles: ['co_owner', 'editor', 'viewer'], top: 'co_owner',
+  list: 'recipeMembers', add: 'addRecipeMember', setRole: 'setRecipeMemberRole', remove: 'removeRecipeMember',
+  key: 'recipeId', back: () => `recipe.html?id=${id}`,
+  help: `<ul>
+    <li><strong>Co-owner</strong> — edit the recipe, delete it, and choose who can edit it.</li>
+    <li><strong>Editor</strong> — edit the recipe. Changes show up in every cookbook it's in.</li>
+    <li><strong>Viewer</strong> — read it even without being in one of its cookbooks.</li></ul>
+    <p class="hint">Anyone in a cookbook that holds this recipe can already read it. Every edit is kept in the recipe's history.</p>`,
+};
+
+function render() {
+  const owners = members.filter(m => m.role === T.top).length;
+  const roleSelect = m => `<select data-role="${m.id}" aria-label="Role for ${escapeHtml(m.name)}">${T.roles.map(r =>
+    `<option value="${r}"${r === m.role ? ' selected' : ''}>${ROLE_LABELS[r]}</option>`).join('')}</select>`;
+  main.innerHTML = `
+    <p><a href="${T.back()}">← ${escapeHtml(title)}</a></p>
+    <h1>${type === 'cookbook' ? 'Who\'s in this cookbook' : 'Who can edit this recipe'}</h1>
+    <div class="card">
+      <ul class="people">${members.map(m => `<li>
+        <span class="who"><strong>${escapeHtml(m.name)}</strong>${m.id === me.id ? ' <span class="muted">(you)</span>' : ''}</span>
+        ${canManage ? roleSelect(m) : `<span class="pill">${ROLE_LABELS[m.role]}</span>`}
+        ${canManage && m.id !== me.id ? `<button type="button" class="btn small danger" data-remove="${m.id}">Remove</button>` : ''}
+        ${m.id === me.id && !(m.role === T.top && owners <= 1) ? `<button type="button" class="btn small secondary" data-remove="${m.id}">Leave</button>` : ''}
+      </li>`).join('') || '<li class="muted">Nobody yet.</li>'}</ul>
+    </div>
+    ${canManage ? `<form class="card" id="invite" novalidate>
+      <h2>Add someone</h2>
+      <label for="who">Their My Apps Hub email</label>
+      <input type="email" id="who" data-field="username" autocomplete="off">
+      <div class="field-error" data-for="username"></div>
+      <label for="as">As</label>
+      <select id="as" data-field="role">${T.roles.map(r => `<option value="${r}"${r === 'viewer' ? ' selected' : ''}>${ROLE_LABELS[r]}</option>`).join('')}</select>
+      <div class="field-error" id="inv-msg"></div>
+      <div class="actions"><button type="submit" class="btn">Add</button></div>
+      <p class="hint">They need a My Apps Hub account first. Adding them also lets them into The Senior Family Table.</p>
+    </form>` : ''}
+    <div class="card"><h2>What each role can do</h2>${T.help}</div>`;
+
+  main.querySelectorAll('[data-role]').forEach(sel => sel.addEventListener('change', async () => {
+    const uid = Number(sel.dataset.role);
+    try {
+      await apiPost(T.setRole, { [T.key]: id, userId: uid, role: sel.value });
+      toast('Role changed');
+      await load();
+    } catch (e) {
+      alert(e.message);
+      await load();
+    }
+  }));
+  main.querySelectorAll('[data-remove]').forEach(b => b.addEventListener('click', async () => {
+    const uid = Number(b.dataset.remove);
+    const m = members.find(x => x.id === uid);
+    const leaving = uid === me.id;
+    if (!confirm(leaving ? `Leave this ${type}? You'll lose access unless you're in it some other way.` : `Remove ${m.name}?`)) { return; }
+    try {
+      await apiPost(T.remove, { [T.key]: id, userId: uid });
+      if (leaving) { window.location.href = 'index.html'; return; }
+      toast('Removed');
+      await load();
+    } catch (e) { alert(e.message); }
+  }));
+  const form = document.getElementById('invite');
+  if (form) {
+    form.addEventListener('submit', async ev => {
+      ev.preventDefault();
+      try {
+        await apiPost(T.add, { [T.key]: id, username: document.getElementById('who').value.trim(), role: document.getElementById('as').value });
+        toast('Added');
+        await load();
+      } catch (e) { showFieldError(form, e, document.getElementById('inv-msg')); }
+    });
+  }
+}
+
+async function load() {
+  const who = await apiGet('whoAmI');
+  me = who.user;
+  if (type === 'cookbook') {
+    const res = await apiGet('getCookbook', { id });
+    title = res.cookbook.title;
+    canManage = res.cookbook.role === 'owner';
+  } else {
+    const res = await apiGet('getRecipe', { id });
+    title = res.recipe.title;
+    canManage = res.recipe.canManage;
+  }
+  members = (await apiGet(T.list, { id })).members;
+  document.title = `Sharing ${title} | The Senior Family Table`;
+  render();
+}
+
+load().catch(e => handleError(main, e));
+</script>
+</body>
+</html>

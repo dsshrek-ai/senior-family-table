@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>History | The Senior Family Table</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27%3E%3Ctext y=%27.9em%27 font-size=%2790%27%3E%F0%9F%8D%BD%EF%B8%8F%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main><p class="muted">Loading…</p></main>
+<script src="js/api.js"></script>
+<script src="js/app.js"></script>
+<script>
+const main = renderShell('');
+const recipeId = Number(param('id'));
+let recipe = null;
+let revisions = [];
+let openId = null;
+let openSnapshot = null;
+
+function snapshotHtml(s) {
+  const methodName = id => (s.methods.find(m => m.id === id) || {}).name;
+  return `<div class="recipe-body" style="margin-top:12px">
+    <div><h3>${escapeHtml(s.title)}</h3>
+      ${s.servings ? `<p class="muted">Serves ${formatQuantity(s.servings)}</p>` : ''}
+      <ul class="ingredients">${s.ingredients.map(i => `<li>${escapeHtml(i.text)}</li>`).join('')}</ul></div>
+    <div><ol class="steps">${s.steps.map(st => `<li>${st.methodId ? `<strong>${escapeHtml(methodName(st.methodId) || '')}:</strong> ` : ''}${escapeHtml(st.text)}</li>`).join('')}</ol>
+      ${s.generalNotes ? `<div class="muted">${formatText(s.generalNotes)}</div>` : ''}</div></div>`;
+}
+
+function render() {
+  main.innerHTML = `
+    <p><a href="recipe.html?id=${recipeId}">← ${escapeHtml(recipe.title)}</a></p>
+    <h1>History</h1>
+    <p class="muted">Every saved change is kept. Restoring an old version saves it as a new version, so nothing is ever lost.</p>
+    <div class="card"><ul class="people">${revisions.map(v => `<li>
+      <span class="who"><strong>Version ${v.version}</strong>${v.version === recipe.version ? ' <span class="pill">Current</span>' : ''}<br>
+        <span class="muted">${escapeHtml(v.note || 'Edited')} · ${escapeHtml(v.changedBy.name)} · ${formatDateTime(v.changedAt)}</span></span>
+      <button type="button" class="btn small secondary" data-view="${v.id}" aria-expanded="${openId === v.id}">${openId === v.id ? 'Hide' : 'View'}</button>
+      ${recipe.canEdit && v.version !== recipe.version ? `<button type="button" class="btn small" data-restore="${v.id}">Restore</button>` : ''}
+      ${openId === v.id && openSnapshot ? `<div style="flex-basis:100%">${snapshotHtml(openSnapshot)}</div>` : ''}
+    </li>`).join('')}</ul></div>`;
+
+  main.querySelectorAll('[data-view]').forEach(b => b.addEventListener('click', async () => {
+    const vid = Number(b.dataset.view);
+    if (openId === vid) { openId = null; openSnapshot = null; render(); return; }
+    try {
+      openSnapshot = (await apiGet('getRevision', { id: recipeId, revisionId: vid })).snapshot;
+      openId = vid;
+      render();
+    } catch (e) { toast(e.message); }
+  }));
+  main.querySelectorAll('[data-restore]').forEach(b => b.addEventListener('click', async () => {
+    const v = revisions.find(x => x.id === Number(b.dataset.restore));
+    if (!confirm(`Restore version ${v.version}? It becomes the current recipe in every cookbook. The current version stays in this history.`)) { return; }
+    try {
+      await apiPost('restoreRevision', { id: recipeId, revisionId: v.id, version: recipe.version });
+      toast(`Restored version ${v.version}`);
+      openId = null;
+      await load();
+    } catch (e) { alert(e.message); }
+  }));
+}
+
+async function load() {
+  const [r, h] = await Promise.all([apiGet('getRecipe', { id: recipeId }), apiGet('recipeRevisions', { id: recipeId })]);
+  recipe = r.recipe;
+  revisions = h.revisions;
+  document.title = `History: ${recipe.title} | The Senior Family Table`;
+  render();
+}
+
+load().catch(e => handleError(main, e));
+</script>
+</body>
+</html>

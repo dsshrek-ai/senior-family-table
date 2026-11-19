@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Search | The Senior Family Table</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27%3E%3Ctext y=%27.9em%27 font-size=%2790%27%3E%F0%9F%8D%BD%EF%B8%8F%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main><p class="muted">Loading…</p></main>
+<script src="js/api.js"></script>
+<script src="js/app.js"></script>
+<script>
+const main = renderShell('search.html');
+let favorites = param('favorites') === '1';
+let timer = null;
+let seq = 0;
+
+main.innerHTML = `
+  <h1>Search</h1>
+  <p class="muted">Searches every recipe you can see — titles, ingredients, and tags.</p>
+  <div class="toolbar">
+    <input type="search" id="q" placeholder="e.g. chicken, Instant Pot, cookies" aria-label="Search recipes" style="flex:1;min-width:200px" value="${escapeHtml(param('q') || '')}">
+    <span class="seg"><button type="button" data-favs="0">All</button><button type="button" data-favs="1">★ Favorites</button></span>
+  </div>
+  <div class="card" id="results" aria-live="polite"></div>`;
+
+const q = document.getElementById('q');
+const out = document.getElementById('results');
+
+function syncSeg() {
+  main.querySelectorAll('[data-favs]').forEach(b => b.classList.toggle('active', (b.dataset.favs === '1') === favorites));
+}
+
+async function run() {
+  const mine = ++seq;
+  const term = q.value.trim();
+  const params = new URLSearchParams();
+  if (term) { params.set('q', term); }
+  if (favorites) { params.set('favorites', '1'); }
+  window.history.replaceState({}, '', `search.html${params.toString() ? `?${params}` : ''}`);
+  try {
+    const res = await apiGet('searchRecipes', { q: term, favorites: favorites ? '1' : '' });
+    if (mine !== seq) { return; } // a newer search already started
+    out.innerHTML = res.recipes.length
+      ? `<p class="muted">${res.recipes.length === 200 ? 'First 200 matches' : `${res.recipes.length} recipe${res.recipes.length === 1 ? '' : 's'}`}</p>
+         <ul class="recipe-list">${res.recipes.map(r => `<li><a href="recipe.html?id=${r.id}">
+           <span class="title">${r.favorite ? '<span class="fav" aria-label="Favorite">★</span> ' : ''}${escapeHtml(r.title)}</span>
+           ${r.description ? `<span class="sub">${escapeHtml(r.description.slice(0, 120))}${r.description.length > 120 ? '…' : ''}</span>` : ''}</a></li>`).join('')}</ul>`
+      : `<p class="muted">${favorites && !term ? 'No favorites yet — tap ☆ on a recipe to add it.' : 'No recipes match.'}</p>`;
+  } catch (e) {
+    handleError(main, e);
+  }
+}
+
+q.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(run, 250); });
+main.querySelectorAll('[data-favs]').forEach(b => b.addEventListener('click', () => { favorites = b.dataset.favs === '1'; syncSeg(); run(); }));
+syncSeg();
+run();
+q.focus();
+</script>
+</body>
+</html>
