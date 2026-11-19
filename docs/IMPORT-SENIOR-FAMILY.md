@@ -91,11 +91,15 @@ Each source line is `{ingredient, quantity, unit, notes}`. Mapping:
 
 | Recipe                                 | Problem                                               | Plan                     |
 | -------------------------------------- | ----------------------------------------------------- | ------------------------ |
-| Refried Beans with Lard (Instant Pot)  | Chili powder and cumin quantities are stored as the date `2026-01-02` — a spreadsheet turned "1/2" into January 2 | Import with **no quantity** and flag; almost certainly ½ Tbsp each — **confirm** |
+| Refried Beans with Lard (Instant Pot)  | Chili powder and cumin quantities are stored as the date `2026-01-02` — a spreadsheet turned "1/2" into January 2 | **Decided:** import as ½ Tbsp each |
 | (lemon juice line)                     | `4` · unit `the` · note `tsp` — unit and note swapped | Import as 4 tsp fresh lemon juice |
-| Rice Pilaf (DUP 2021)                  | Title and a `DUP` tag mark it as a duplicate          | **Skip it?** — confirm   |
+| Rice Pilaf (DUP 2021)                  | Title and a `DUP` tag mark it as a duplicate          | **Decided:** skip it — 189 recipes import |
 | Cilantro "a lot!"                      | Unit is a comment                                     | No quantity; note kept   |
-| 46 recipes tagged **Nourish Forward**  | Tag from the retired app                              | Keep as a tag (useful filter) unless you'd rather drop it |
+| 46 recipes tagged **Nourish Forward**  | Tag from the retired app                              | **Decided:** keep as a tag |
+
+Decisions confirmed by the owner on 2026-11-19. Any *other* unexpected value the script meets
+(a quantity that isn't a number, an unknown unit) is imported without a quantity and listed in
+the report — never guessed.
 
 Every flagged line also gets `needs_review` noted in the import record, and the script prints a
 report of all of them.
@@ -107,7 +111,7 @@ report of all of them.
 2. Real run: everything in **one transaction** — either all 190 recipes import or none do.
 3. **Re-runnable safely:** each import record stores `source_ref = senior-family-cookbook:<id>`
    (unique), so a second run skips recipes already imported instead of duplicating them.
-4. Verify: 190 (or 189) recipes in the new cookbook, ingredient and step counts match the
+4. Verify: 189 recipes in the new cookbook, ingredient and step counts match the
    source, spot-check five recipes side by side with the old app.
 
 ## 8. After the import

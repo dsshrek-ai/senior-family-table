@@ -483,3 +483,19 @@ INSERT IGNORE INTO sft_stores (name, scope, sort_order) VALUES
   ('Costco','system',1),
   ('Sam''s Club','system',2),
   ('Walmart','system',3);
+
+-- ---------------------------------------------------------------------------
+-- My Apps Hub tile + the grant that gates the app
+-- ---------------------------------------------------------------------------
+
+INSERT INTO apps (app_key, name, is_public, description, icon_emoji, icon_color_class, launch_url, sso_enabled) VALUES
+  ('senior-family-table', 'The Senior Family Table', 0,
+   'Family cookbooks, shared recipes, and shopping lists that sync between phones.',
+   '🍽️', 'icon-green', 'https://dsshrek-ai.github.io/senior-family-table/', 1)
+ON DUPLICATE KEY UPDATE name = VALUES(name), description = VALUES(description), launch_url = VALUES(launch_url);
+
+-- Grant yourself access (others are granted automatically when invited to something):
+-- INSERT INTO app_access (user_id, app_id)
+-- SELECT u.id, a.id FROM users u JOIN apps a ON a.app_key = 'senior-family-table'
+-- WHERE u.username = 'you@example.com'
+-- ON DUPLICATE KEY UPDATE user_id = app_access.user_id;
