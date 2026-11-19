@@ -12,6 +12,7 @@
 <script src="js/api.js"></script>
 <script src="js/app.js"></script>
 <script src="js/addtolist.js"></script>
+<script src="js/photos.js"></script>
 <script>
 const main = renderShell('');
 const bookId = Number(param('id'));
@@ -86,11 +87,13 @@ function recipeRows(list) {
   if (!list.length) {
     return `<p class="muted">${recipes.length ? 'No recipes match.' : 'No recipes in this cookbook yet.'}</p>`;
   }
+  const hasCovers = list.some(r => r.cover);
   return `<ul class="recipe-list">${list.map(r => `
     <li>
       ${selecting ? `<label class="check" style="padding:0 10px"><input type="checkbox" data-pick="${r.id}"${selected.has(r.id) ? ' checked' : ''} aria-label="Choose ${escapeHtml(r.title)}"></label>` : `
       <button type="button" class="icon-btn fav" data-fav="${r.id}" aria-pressed="${r.favorite}"
         aria-label="${r.favorite ? 'Remove from' : 'Add to'} favorites: ${escapeHtml(r.title)}">${r.favorite ? '★' : '☆'}</button>`}
+      ${hasCovers ? (r.cover ? `<img class="thumb" src="${photoSrc(r.cover)}" alt="" loading="lazy">` : '<span class="thumb none" aria-hidden="true"></span>') : ''}
       <a href="recipe.html?id=${r.id}&cookbook=${bookId}"><span class="title">${escapeHtml(r.title)}</span>
         <span class="sub">${r.tags.slice(0, 6).map(escapeHtml).join(' · ')}</span></a>
       ${canEdit() && !selecting ? `<button type="button" class="btn small secondary" data-unlink="${r.id}" aria-label="Remove ${escapeHtml(r.title)} from this cookbook">Remove</button>` : ''}

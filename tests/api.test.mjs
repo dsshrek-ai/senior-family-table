@@ -9,6 +9,7 @@
 
 import { execSync } from 'node:child_process';
 import assert from 'node:assert/strict';
+import { png } from './png.mjs';
 
 const API = process.env.API_URL;
 const SQL = process.env.SQL;
@@ -818,6 +819,129 @@ await test('import: "add the one you already have instead" links it, makes no co
   assert.ok((await call('owner', 'getRecipe', { params: { id: soup } })).data.recipe.cookbooks.some(c => c.id === book));
   assert.equal(sql(`SELECT outcome FROM sft_recipe_imports WHERE recipe_id = ${soup} ORDER BY id DESC LIMIT 1`), 'linked_existing');
   assert.equal((await call('outsider', 'importLinkExisting', { body: { cookbookId: book, recipeId: soup, rawText: 'x' } })).status, 404);
+});
+
+// ---- Photos (ARCHITECTURE.md §8, acceptance test 5) ----------------------------
+
+// A JPEG marked "rotate 90° clockwise to display", the way phones save portrait photos.
+function withExifOrientation6(jpeg) {
+  const tiff = Buffer.from([0x4d, 0x4d, 0, 0x2a, 0, 0, 0, 8, 0, 1, 0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, 0, 0, 0, 0]);
+  const payload = Buffer.concat([Buffer.from('Exif\0\0', 'binary'), tiff]);
+  const len = Buffer.alloc(2); len.writeUInt16BE(payload.length + 2);
+  return Buffer.concat([jpeg.subarray(0, 2), Buffer.from([0xff, 0xe1]), len, payload, jpeg.subarray(2)]);
+}
+
+async function upload(who, action, params, bytes, name = 'photo.png', type = 'image/png', caption = '') {
+  const url = new URL(API);
+  url.searchParams.set('action', action);
+  for (const [k, v] of Object.entries(params)) { url.searchParams.set(k, String(v)); }
+  const form = new FormData();
+  form.append('file', new Blob([bytes], { type }), name);
+  if (caption) { form.append('caption', caption); }
+  const res = await fetch(url, { method: 'POST', headers: who ? { Authorization: `Bearer tok-${who}` } : {}, body: form });
+  return { status: res.status, data: await res.json() };
+}
+const photoUrl = q => new URL(q, API).toString();
+
+let photoRecipe = 0;
+let firstPhoto = null;
+await test('photos: an editor adds a cover and a second photo; it is shrunk and stored as JPEG', async () => {
+  photoRecipe = (await call('elaine', 'createRecipe', { body: { cookbookId: familyBook, recipe: { title: 'Photo Test Pie' } } })).data.id;
+  const a = await upload('elaine', 'uploadRecipePhoto', { recipeId: photoRecipe }, png(2400, 1200), 'pie.png', 'image/png', 'Fresh from the oven');
+  assert.equal(a.status, 200, JSON.stringify(a.data));
+  const b = await upload('elaine', 'uploadRecipePhoto', { recipeId: photoRecipe }, png(300, 200));
+  assert.equal(b.status, 200);
+  const photos = b.data.photos;
+  assert.equal(photos.length, 2);
+  assert.deepEqual(photos.map(p => p.isCover), [true, false]);
+  assert.equal(photos[0].caption, 'Fresh from the oven');
+  assert.deepEqual([photos[0].width, photos[0].height], [1600, 800]);
+  firstPhoto = photos[0];
+  const res = await fetch(photoUrl(photos[0].thumb));
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('content-type'), 'image/jpeg');
+  const bytes = Buffer.from(await res.arrayBuffer());
+  assert.deepEqual([...bytes.subarray(0, 2)], [0xff, 0xd8]);
+});
+await test('photos: a cookbook member can see them; the cookbook list shows the cover', async () => {
+  const r = await call('owner', 'getRecipe', { params: { id: photoRecipe } });
+  assert.equal(r.data.recipe.photos.length, 2);
+  const book = await call('owner', 'getCookbook', { params: { id: familyBook } });
+  assert.ok(book.data.recipes.find(x => x.id === photoRecipe).cover);
+  assert.equal(book.data.recipes.find(x => x.id === soup).cover, null);
+});
+await test('photos: an unrelated person gets "not found" for the recipe and cannot upload', async () => {
+  assert.equal((await call('outsider', 'getRecipe', { params: { id: photoRecipe } })).status, 404);
+  assert.equal((await upload('outsider', 'uploadRecipePhoto', { recipeId: photoRecipe }, png(10, 10))).status, 404);
+  assert.equal((await call('outsider', 'deletePhoto', { body: { id: firstPhoto.id } })).status, 404);
+});
+await test('photos: a viewer can see them but not add, move, caption or remove them', async () => {
+  // The owner is a cookbook owner but not on the recipe: view only.
+  assert.equal((await upload('owner', 'uploadRecipePhoto', { recipeId: photoRecipe }, png(10, 10))).status, 403);
+  assert.equal((await call('owner', 'movePhoto', { body: { id: firstPhoto.id, direction: 1 } })).status, 403);
+  assert.equal((await call('owner', 'setPhotoCaption', { body: { id: firstPhoto.id, caption: 'x' } })).status, 403);
+  assert.equal((await call('owner', 'deletePhoto', { body: { id: firstPhoto.id } })).status, 403);
+});
+await test('photos: links are signed — a changed id, size or expiry is refused, and no sign-in is needed', async () => {
+  const good = new URL(photoUrl(firstPhoto.full));
+  assert.equal((await fetch(good)).status, 200);
+  for (const [k, v] of [['id', String(Number(good.searchParams.get('id')) + 1)], ['s', 'thumb'], ['e', String(Number(good.searchParams.get('e')) + 3600)], ['g', 'x'.repeat(40)]]) {
+    const bad = new URL(good); bad.searchParams.set(k, v);
+    assert.equal((await fetch(bad)).status, 404, `changed ${k}`);
+  }
+});
+await test('photos: not a real image (renamed text) is refused', async () => {
+  const r = await upload('elaine', 'uploadRecipePhoto', { recipeId: photoRecipe }, Buffer.from('hello, not a photo'), 'fake.jpg', 'image/jpeg');
+  assert.equal(r.status, 400);
+  assert.equal(r.data.field, 'file');
+});
+await test('photos: a sideways phone JPEG is turned upright', async () => {
+  const jpeg = Buffer.from(await (await fetch(photoUrl(firstPhoto.thumb))).arrayBuffer());   // 480 × 240
+  const r = await upload('elaine', 'uploadRecipePhoto', { recipeId: photoRecipe }, withExifOrientation6(jpeg), 'phone.jpg', 'image/jpeg');
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  const p = r.data.photos[2];
+  assert.deepEqual([p.width, p.height], [240, 480]);
+});
+await test('photos: move, make cover, caption, and remove (the next photo becomes the cover)', async () => {
+  const ids = (await call('elaine', 'getRecipe', { params: { id: photoRecipe } })).data.recipe.photos.map(p => p.id);
+  let r = await call('elaine', 'movePhoto', { body: { id: ids[2], first: true } });
+  assert.deepEqual(r.data.photos.map(p => p.id), [ids[2], ids[0], ids[1]]);
+  assert.equal(r.data.photos[0].isCover, true);
+  r = await call('elaine', 'movePhoto', { body: { id: ids[0], direction: 1 } });
+  assert.deepEqual(r.data.photos.map(p => p.id), [ids[2], ids[1], ids[0]]);
+  r = await call('elaine', 'setPhotoCaption', { body: { id: ids[1], caption: '  Sliced  ' } });
+  assert.equal(r.data.photos[1].caption, 'Sliced');
+  const removedLink = r.data.photos[0].full;
+  r = await call('elaine', 'deletePhoto', { body: { id: ids[2] } });
+  assert.deepEqual(r.data.photos.map(p => [p.id, p.isCover]), [[ids[1], true], [ids[0], false]]);
+  assert.equal((await fetch(photoUrl(removedLink))).status, 404);
+  assert.equal(sql(`SELECT COUNT(*) FROM sft_audit_events WHERE resource_type = 'photo' AND action = 'deleted' AND resource_id = ${ids[2]}`), '1');
+});
+await test('photos: a deleted recipe\'s photo links stop working', async () => {
+  const link = (await call('elaine', 'getRecipe', { params: { id: photoRecipe } })).data.recipe.photos[0].thumb;
+  sql(`UPDATE sft_recipes SET deleted_at = NOW() WHERE id = ${photoRecipe}`);
+  assert.equal((await fetch(photoUrl(link))).status, 404);
+  sql(`UPDATE sft_recipes SET deleted_at = NULL WHERE id = ${photoRecipe}`);
+});
+await test('note photos: only the author adds or removes them; a private note\'s photos never reach anyone else', async () => {
+  const shared = (await call('elaine', 'addNote', { body: { recipeId: photoRecipe, text: 'Mine came out like this', visibility: 'shared' } })).data.note;
+  const priv = (await call('elaine', 'addNote', { body: { recipeId: photoRecipe, text: 'Burnt edges — oops', visibility: 'private' } })).data.note;
+  let r = await upload('elaine', 'uploadNotePhoto', { noteId: shared.id }, png(200, 200));
+  assert.equal(r.status, 200);
+  assert.equal(r.data.note.photos.length, 1);
+  assert.equal((await upload('elaine', 'uploadNotePhoto', { noteId: priv.id }, png(200, 200))).status, 200);
+  assert.equal((await upload('owner', 'uploadNotePhoto', { noteId: shared.id }, png(10, 10))).status, 403);
+  assert.equal((await upload('owner', 'uploadNotePhoto', { noteId: priv.id }, png(10, 10))).status, 404);
+  const ownerView = (await call('owner', 'getRecipe', { params: { id: photoRecipe } })).data.recipe.notes;
+  assert.deepEqual(ownerView.map(n => [n.text, n.photos.length]), [['Mine came out like this', 1]]);
+  const photoId = r.data.note.photos[0].id;
+  assert.equal((await call('owner', 'deleteNotePhoto', { body: { id: photoId } })).status, 403);
+  for (let i = 0; i < 3; i++) { await upload('elaine', 'uploadNotePhoto', { noteId: shared.id }, png(20, 20)); }
+  assert.equal((await upload('elaine', 'uploadNotePhoto', { noteId: shared.id }, png(20, 20))).status, 400, 'fifth photo');
+  const link = r.data.note.photos[0].full;
+  r = await call('elaine', 'deleteNotePhoto', { body: { id: photoId } });
+  assert.equal(r.data.note.photos.length, 3);
+  assert.equal((await fetch(photoUrl(link))).status, 404);
 });
 
 // ---- Admin import ----------------------------------------------------------

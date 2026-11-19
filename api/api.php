@@ -9,6 +9,7 @@ require_once __DIR__ . '/lib/recipes.php';
 require_once __DIR__ . '/lib/shopping.php';
 require_once __DIR__ . '/lib/notes_tags.php';
 require_once __DIR__ . '/lib/paste_import.php';
+require_once __DIR__ . '/lib/photos.php';
 
 ini_set('display_errors', '0');
 header('Content-Type: application/json; charset=utf-8');
@@ -124,6 +125,9 @@ try {
     respond(['ok' => true]);
   }
 
+  // Signed, expiring photo links (lib/photos.php). The signature is the permission.
+  if ($action === 'photo') { servePhoto($_GET); }
+
   $user = currentUser();
   $uid = $user['id'];
 
@@ -195,9 +199,10 @@ try {
       $role = requireCookbookRole($uid, $id, ['owner', 'editor', 'viewer']);
       $book = q1('SELECT id, title, description, archived_at FROM sft_cookbooks WHERE id = ?', 'i', [$id]);
       $recipes = q(
-        'SELECT r.id, r.title, r.description, r.servings, cr.display_order,
+        'SELECT r.id, r.title, r.description, r.servings, cr.display_order, cp.id AS cover_id,
                 (SELECT us.is_favorite FROM sft_recipe_user_state us WHERE us.recipe_id = r.id AND us.user_id = ?) AS fav
            FROM sft_cookbook_recipes cr JOIN sft_recipes r ON r.id = cr.recipe_id AND r.deleted_at IS NULL
+           LEFT JOIN sft_recipe_photos cp ON cp.recipe_id = r.id AND cp.is_cover = 1 AND cp.deleted_at IS NULL
           WHERE cr.cookbook_id = ? ORDER BY cr.display_order, r.title',
         'ii', [$uid, $id]
       );
@@ -207,6 +212,7 @@ try {
           'id' => (int)$r['id'], 'title' => $r['title'], 'description' => $r['description'],
           'servings' => $r['servings'] !== null ? (float)$r['servings'] : null, 'favorite' => (bool)$r['fav'],
           'tags' => array_map(fn($t) => $t['name'], visibleRecipeTags($uid, (int)$r['id'])),
+          'cover' => $r['cover_id'] ? photoLink('r', (int)$r['cover_id'], 'thumb') : null,
         ];
       }
       respond(['ok' => true, 'cookbook' => [
@@ -305,6 +311,7 @@ try {
           ORDER BY n.created_at", 'ii', [$id, $uid]);
       $state = q1('SELECT is_favorite, rating, tested_approved, saved_scale_mode, saved_scale FROM sft_recipe_user_state WHERE recipe_id = ? AND user_id = ?', 'ii', [$id, $uid]);
       $updatedBy = q1('SELECT u.id, u.username, u.display_name FROM sft_recipes r JOIN users u ON u.id = r.updated_by WHERE r.id = ?', 'i', [$id]);
+      $notePhotos = notePhotos(array_map(fn($n) => (int)$n['id'], $notes));
 
       $recipe += [
         'myRole' => $role, 'canEdit' => in_array($role, ['co_owner', 'editor'], true), 'canManage' => $role === 'co_owner',
@@ -315,7 +322,9 @@ try {
           'id' => (int)$n['id'], 'visibility' => $n['visibility'], 'text' => $n['note_text'],
           'author' => publicUser(['id' => $n['author_id'], 'username' => $n['username'], 'display_name' => $n['display_name']]),
           'mine' => (int)$n['author_id'] === $uid, 'createdAt' => $n['created_at'], 'updatedAt' => $n['updated_at'],
+          'photos' => $notePhotos[(int)$n['id']] ?? [],
         ], $notes),
+        'photos' => recipePhotos($id),
         'me' => [
           'favorite' => $state ? (bool)$state['is_favorite'] : false,
           'rating' => $state && $state['rating'] !== null ? (int)$state['rating'] : null,
@@ -994,6 +1003,84 @@ try {
       exec_('UPDATE sft_recipe_notes SET deleted_at = NOW() WHERE id = ?', 'i', [(int)$note['id']]);
       if (!$mine) { audit($uid, 'note', (int)$note['id'], 'deleted', 'shared note by user ' . $note['user_id']); }
       respond(['ok' => true]);
+    }
+
+    // ---- Photos (ARCHITECTURE.md §8) -------------------------------------------
+    // Recipe photos: added and arranged by anyone who can edit the recipe; the first is the
+    // cover. Note photos: added and removed by the note's author, seen by whoever sees the note.
+    // Uploads are multipart (the file is "file"); the action and ids go in the address.
+
+    case 'uploadRecipePhoto': {
+      requirePost();
+      $recipeId = intParam($_GET, 'recipeId');
+      requireViewRecipe($uid, $recipeId);
+      if (!canEditRecipe($uid, $recipeId)) { fail('Only people who can edit this recipe can add photos', 403); }
+      $count = q1('SELECT COUNT(*) AS n, COALESCE(MAX(position), -1) AS last FROM sft_recipe_photos WHERE recipe_id = ? AND deleted_at IS NULL', 'i', [$recipeId]);
+      if ((int)$count['n'] >= RECIPE_PHOTO_LIMIT) { fail('A recipe can have up to ' . RECIPE_PHOTO_LIMIT . ' photos', 400, 'file'); }
+      $caption = textParam($_POST, 'caption', 255, false);
+      $stored = storeUploadedPhoto($_FILES['file'] ?? null);
+      $id = exec_('INSERT INTO sft_recipe_photos (recipe_id, storage_key, caption, is_cover, position, width, height, uploaded_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        'issiiiii', [$recipeId, $stored['key'], $caption, (int)$count['n'] === 0 ? 1 : 0, (int)$count['last'] + 1, $stored['width'], $stored['height'], $uid]);
+      audit($uid, 'photo', $id, 'added', "recipe $recipeId");
+      respond(['ok' => true, 'id' => $id, 'photos' => recipePhotos($recipeId)]);
+    }
+
+    case 'setPhotoCaption': {
+      requirePost();
+      $b = body();
+      $p = editableRecipePhoto($uid, intParam($b, 'id'));
+      exec_('UPDATE sft_recipe_photos SET caption = ? WHERE id = ?', 'si', [textParam($b, 'caption', 255, false), (int)$p['id']]);
+      respond(['ok' => true, 'photos' => recipePhotos((int)$p['recipe_id'])]);
+    }
+
+    // Move a photo one place earlier (direction -1) or later (1), or to the front (`first`),
+    // where it becomes the cover.
+    case 'movePhoto': {
+      requirePost();
+      $b = body();
+      $p = editableRecipePhoto($uid, intParam($b, 'id'));
+      $recipeId = (int)$p['recipe_id'];
+      tidyRecipePhotos($recipeId);
+      $ids = array_map(fn($r) => (int)$r['id'], q('SELECT id FROM sft_recipe_photos WHERE recipe_id = ? AND deleted_at IS NULL ORDER BY position', 'i', [$recipeId]));
+      $from = array_search((int)$p['id'], $ids, true);
+      $to = !empty($b['first']) ? 0 : max(0, min(count($ids) - 1, $from + ((int)($b['direction'] ?? 0) < 0 ? -1 : 1)));
+      array_splice($ids, $from, 1);
+      array_splice($ids, $to, 0, [(int)$p['id']]);
+      foreach ($ids as $i => $pid) { exec_('UPDATE sft_recipe_photos SET position = ? WHERE id = ?', 'ii', [$i, $pid]); }
+      tidyRecipePhotos($recipeId);
+      respond(['ok' => true, 'photos' => recipePhotos($recipeId)]);
+    }
+
+    // Removed photos are kept for 30 days (the purge job deletes the files), like recipes.
+    case 'deletePhoto': {
+      requirePost();
+      $p = editableRecipePhoto($uid, intParam(body(), 'id'));
+      exec_('UPDATE sft_recipe_photos SET deleted_at = NOW() WHERE id = ?', 'i', [(int)$p['id']]);
+      tidyRecipePhotos((int)$p['recipe_id']);
+      audit($uid, 'photo', (int)$p['id'], 'deleted', 'recipe ' . $p['recipe_id']);
+      respond(['ok' => true, 'photos' => recipePhotos((int)$p['recipe_id'])]);
+    }
+
+    case 'uploadNotePhoto': {
+      requirePost();
+      $note = visibleNote($uid, intParam($_GET, 'noteId'));
+      if ((int)$note['user_id'] !== $uid) { fail('Only the person who wrote a note can add photos to it', 403); }
+      $n = q1('SELECT COUNT(*) AS n FROM sft_recipe_note_photos WHERE note_id = ?', 'i', [(int)$note['id']]);
+      if ((int)$n['n'] >= NOTE_PHOTO_LIMIT) { fail('A note can have up to ' . NOTE_PHOTO_LIMIT . ' photos', 400, 'file'); }
+      $stored = storeUploadedPhoto($_FILES['file'] ?? null);
+      exec_('INSERT INTO sft_recipe_note_photos (note_id, storage_key) VALUES (?, ?)', 'is', [(int)$note['id'], $stored['key']]);
+      respond(['ok' => true, 'note' => noteById((int)$note['id'], $uid)]);
+    }
+
+    case 'deleteNotePhoto': {
+      requirePost();
+      $p = q1('SELECT id, note_id, storage_key FROM sft_recipe_note_photos WHERE id = ?', 'i', [intParam(body(), 'id')]);
+      if (!$p) { notFound('Photo'); }
+      $note = visibleNote($uid, (int)$p['note_id']);
+      if ((int)$note['user_id'] !== $uid) { fail('Only the person who wrote a note can remove its photos', 403); }
+      exec_('DELETE FROM sft_recipe_note_photos WHERE id = ?', 'i', [(int)$p['id']]);
+      removePhotoFiles($p['storage_key']);
+      respond(['ok' => true, 'note' => noteById((int)$note['id'], $uid)]);
     }
 
     // ---- Tags (REQUIREMENTS.md §7) --------------------------------------------

@@ -2,6 +2,7 @@
 // Family notes and tags: permission checks and small helpers (REQUIREMENTS.md §7–8).
 
 require_once __DIR__ . '/core.php';
+require_once __DIR__ . '/photos.php';
 
 function noteVisibility(array $b): string {
   $v = (string)($b['visibility'] ?? 'shared');
@@ -27,6 +28,7 @@ function noteById(int $noteId, int $userId): array {
     'id' => (int)$n['id'], 'visibility' => $n['visibility'], 'text' => $n['note_text'],
     'author' => ['id' => (int)$n['user_id'], 'name' => $n['display_name'] ?: $n['username']],
     'mine' => (int)$n['user_id'] === $userId, 'createdAt' => $n['created_at'], 'updatedAt' => $n['updated_at'],
+    'photos' => notePhotos([$noteId])[$noteId] ?? [],
   ];
 }
 

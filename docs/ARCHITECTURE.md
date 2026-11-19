@@ -342,6 +342,29 @@ beside an empty editor. The original pasted text is shown on the recipe's Histor
 - Each recipe has one cover (`is_cover`) and any number of others, ordered by `position`.
   Note photos use the same storage and the same visibility as their note.
 
+### 8.1 As built (2026-11-19)
+
+- **Who:** anyone who can edit a recipe adds, captions, reorders and removes its photos (up to
+  30); viewers see them. Note photos (up to 4 per note) are added and removed only by the
+  note's author; a private note's photos are never linked for anyone else.
+- **The first photo is the cover.** "Make cover" moves a photo to the front. The cover shows
+  at the top of the recipe, beside the recipe in cookbook lists, and at the top of Send as PDF.
+- **Before upload** the browser shrinks the photo to 2000 px and turns it upright
+  (`js/photos.js`), so a 10 MB phone photo goes up as ~0.5 MB. If the browser can't read the
+  file it sends the original and the server decides.
+- **On the server** (`api/lib/photos.php`): real type checked with `getimagesize` (JPEG, PNG,
+  WebP), at most 30 megapixels, EXIF rotation applied, re-encoded to JPEG at 1600 px and a
+  480 px thumbnail, transparent areas on white. Files are written to a `.part` name and
+  renamed, so a half-written file is never served.
+- **Links:** `?action=photo&t=r|n&id=…&s=full|thumb&e=…&g=…`, an HMAC over type, id, size and
+  expiry with `PHOTO_URL_KEY`. Expiry is rounded to the hour (valid 1–2 hours), so a page's
+  links stay the same — and cached — for at least an hour. Any change to the link gives
+  "not found"; an expired one gives 410. A removed photo, deleted note or deleted recipe stops
+  serving at once.
+- **Removing** a recipe photo marks it deleted (kept 30 days for the purge job, audited); a
+  note photo is deleted outright with its files.
+- Photos are not in recipe revisions.
+
 ---
 
 ## 9. Export, backup, retention

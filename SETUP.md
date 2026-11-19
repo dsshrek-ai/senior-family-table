@@ -24,7 +24,14 @@ the API is on seniorfamily.org, and the data is in the MyDataWorld database.
 3. Copy `api/config.example.php` to `config.php` **on the server**, fill in the MyDataWorld
    database details (the same ones the other apps use), and leave `ALLOWED_ORIGIN` as
    `https://dsshrek-ai.github.io`.
-4. Check it: opening `https://seniorfamily.org/senior-family-table-api/api.php?action=whoAmI`
+4. **Photos.** In cPanel File Manager, create a folder **next to** `public_html` (not inside
+   it), e.g. `/home/<account>/senior-family-table-photos`. In `config.php` set `PHOTO_DIR` to
+   that full path, and set `PHOTO_URL_KEY` to a long random secret (any 40+ random letters and
+   numbers; never reuse it elsewhere). Photos need PHP's GD extension (Quill Clock already uses
+   it) and an upload limit of at least 16 MB (`upload_max_filesize` / `post_max_size` in
+   cPanel → MultiPHP INI Editor) — though the app shrinks phone photos to about half a
+   megabyte before sending them.
+5. Check it: opening `https://seniorfamily.org/senior-family-table-api/api.php?action=whoAmI`
    should show `{"ok":false,"error":"Please sign in"}`.
 
 Never upload a `config.php` from your own computer's copy of the repo.

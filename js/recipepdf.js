@@ -34,9 +34,10 @@ function slugify(title) {
 
 /**
  * r: the recipe as getRecipe returns it; f: scale factor; amountLabel: e.g. "12 servings" when
- * scaled (shown under the title), or '' at the original amount.
+ * scaled (shown under the title), or '' at the original amount; cover: { data (JPEG data URL),
+ * width, height } or null.
  */
-async function buildRecipePdf(r, f, amountLabel) {
+async function buildRecipePdf(r, f, amountLabel, cover = null) {
   const { jsPDF } = await loadJsPdf();
   const doc = new jsPDF({ unit: 'pt', format: 'letter' });
   const W = doc.internal.pageSize.getWidth();
@@ -70,6 +71,14 @@ async function buildRecipePdf(r, f, amountLabel) {
     y += 8;
   };
 
+  if (cover) {
+    const h = Math.min(230, width * cover.height / cover.width);
+    const w = h * cover.width / cover.height;
+    try {
+      doc.addImage(cover.data, 'JPEG', M + (width - w) / 2, y, w, h);
+      y += h + 14;
+    } catch (e) { /* a photo that won't embed is left out */ }
+  }
   para(r.title, { size: 22, font: 'times', style: 'bold', gap: 2 });
   const facts = [
     amountLabel ? `Makes ${amountLabel} (scaled)` : (r.servings ? `Serves ${formatQuantity(r.servings)}` : ''),
@@ -137,8 +146,8 @@ async function buildRecipePdf(r, f, amountLabel) {
 }
 
 // Builds the PDF and offers it to the phone's share sheet, or downloads it.
-async function sendRecipePdf(r, f, amountLabel) {
-  const blob = await buildRecipePdf(r, f, amountLabel);
+async function sendRecipePdf(r, f, amountLabel, cover = null) {
+  const blob = await buildRecipePdf(r, f, amountLabel, cover);
   const name = `${slugify(r.title)}.pdf`;
   const file = new File([blob], name, { type: 'application/pdf' });
   // Phones and tablets: the share sheet (Messages, Mail…). Computers: a plain download,

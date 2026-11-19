@@ -13,6 +13,7 @@
 <script src="js/app.js"></script>
 <script src="js/addtolist.js"></script>
 <script src="js/recipepdf.js"></script>
+<script src="js/photos.js"></script>
 <script>
 const main = renderShell('');
 const recipeId = Number(param('id'));
@@ -22,6 +23,8 @@ let myBooks = [];
 // Scaling (§6 / REQUIREMENTS §6): servings or batches; the master recipe is never changed.
 let scaleMode = 'servings';
 let scaleValue = null;
+let arranging = false;       // editors rearranging photos
+let pendingNotePhotos = [];  // photos chosen for the note being written: { file, url }
 
 const baseFor = mode => (mode === 'batches' ? r.yieldQuantity : r.servings);
 function factor() {
@@ -101,6 +104,7 @@ function render() {
   main.innerHTML = `
     <p class="no-print">${back ? `<a href="cookbook.html?id=${back.id}">← ${escapeHtml(back.title)}</a>` : '<a href="index.html">← My Cookbooks</a>'}</p>
     <div class="recipe-head card">
+      <div id="hero"></div>
       <div class="toolbar" style="margin:0">
         <h1 style="margin:0;flex:1">${escapeHtml(r.title)}</h1>
         <button type="button" class="icon-btn fav no-print" id="fav" aria-pressed="${r.me.favorite}" aria-label="${r.me.favorite ? 'Remove from favorites' : 'Add to favorites'}">${r.me.favorite ? '★' : '☆'}</button>
@@ -110,8 +114,10 @@ function render() {
         <button type="button" class="link-btn no-print" id="tags-btn" style="margin-left:4px">${r.tags.length ? 'Edit tags' : '+ Add tags'}</button></div>
       <section class="card hidden no-print" id="tags-box" style="margin:12px 0 0;box-shadow:none" aria-label="Tags"></section>
       ${r.description ? `<div style="margin-top:12px">${formatText(r.description)}</div>` : ''}
+      <div id="photos-box" class="no-print" style="margin-top:10px"></div>
       <div class="actions no-print">
         ${r.ingredients.length ? '<button type="button" class="btn" id="to-list">🛒 Add to shopping list</button>' : ''}
+        ${r.canEdit ? '<button type="button" class="btn secondary" id="add-photos">📷 Add photos</button>' : ''}
         ${r.canEdit ? `<a class="btn secondary" href="recipe-edit.html?id=${r.id}${fromCookbook ? `&cookbook=${fromCookbook}` : ''}">Edit</a>` : ''}
         <a class="btn secondary" href="share.html?type=recipe&id=${r.id}">${r.canManage ? 'Share' : 'People'}</a>
         <a class="btn secondary" href="history.html?id=${r.id}">History</a>
@@ -133,6 +139,8 @@ function render() {
         <label for="note-text" style="margin-top:0">Add a note</label>
         <textarea id="note-text" data-field="text" rows="3" maxlength="5000" placeholder="Tips, changes you made, who loves it…"></textarea>
         <div class="field-error" data-for="text"></div>
+        <div class="note-photos" id="note-pending"></div>
+        <button type="button" class="link-btn" id="note-add-photo">📷 Add photos to this note</button>
         <fieldset style="border:0;padding:0;margin:8px 0 0"><legend class="muted" style="font-size:0.9rem">Who can see it</legend>
           <label class="check" style="display:inline-flex;margin-right:16px"><input type="radio" name="vis" value="shared" checked> Everyone who can see this recipe</label>
           <label class="check" style="display:inline-flex"><input type="radio" name="vis" value="private"> Only me</label></fieldset>
@@ -150,10 +158,13 @@ function render() {
 
   renderIngredients();
   wireScale();
+  renderPhotos();
   renderNotes();
   wireNotes();
   document.getElementById('tags-btn').addEventListener('click', showTags);
   document.getElementById('send-pdf').addEventListener('click', ev => sendPdf(ev.currentTarget));
+  const addPhotos = document.getElementById('add-photos');
+  if (addPhotos) { addPhotos.addEventListener('click', () => pickPhotos(files => addRecipePhotos(files, addPhotos))); }
   const toList = document.getElementById('to-list');
   if (toList) {
     toList.addEventListener('click', () => {
@@ -193,12 +204,135 @@ function render() {
   }
 }
 
+// ---- Photos (the first is the cover) ----------------------------------------------
+
+const NOTE_PHOTO_MAX = 4;
+const attr = s => escapeHtml(s).replace(/"/g, '&quot;');
+
+function renderPhotos() {
+  const ps = r.photos;
+  const hero = document.getElementById('hero');
+  const box = document.getElementById('photos-box');
+  if (!ps.length) { arranging = false; }
+  hero.innerHTML = ps.length ? `<button type="button" class="recipe-hero" data-view="0" aria-label="View photo${ps[0].caption ? `: ${attr(ps[0].caption)}` : ''}">
+    <img src="${photoSrc(ps[0].full)}" alt="${attr(ps[0].caption || r.title)}"></button>` : '';
+  let html = '';
+  if (ps.length > 1 && !arranging) {
+    html += `<div class="photo-strip">${ps.map((p, i) => `<button type="button" data-view="${i}" aria-label="View photo ${i + 1}${p.caption ? `: ${attr(p.caption)}` : ''}">
+      <img src="${photoSrc(p.thumb)}" alt="" loading="lazy"></button>`).join('')}</div>`;
+  }
+  if (r.canEdit && ps.length) {
+    html += `<button type="button" class="link-btn" id="arrange" aria-expanded="${arranging}">${arranging ? 'Done arranging' : 'Arrange photos'}</button>`;
+  }
+  if (arranging) {
+    html += `<p class="hint" style="margin:6px 0 0">The first photo is the cover. Captions save when you leave the box.</p>
+      <div class="photo-grid">${ps.map((p, i) => `<div class="photo-card" data-pid="${p.id}">
+        <img src="${photoSrc(p.thumb)}" alt="Photo ${i + 1}">
+        ${i === 0 ? '<span class="pill" style="margin-top:6px">Cover</span>' : ''}
+        <input type="text" maxlength="255" data-cap placeholder="Caption (optional)" value="${attr(p.caption || '')}" aria-label="Caption for photo ${i + 1}">
+        <div class="row">
+          ${i > 0 ? '<button type="button" class="btn small secondary" data-first>Make cover</button>' : ''}
+          <button type="button" class="btn small secondary" data-move="-1" aria-label="Move photo ${i + 1} earlier"${i === 0 ? ' disabled' : ''}>◀</button>
+          <button type="button" class="btn small secondary" data-move="1" aria-label="Move photo ${i + 1} later"${i === ps.length - 1 ? ' disabled' : ''}>▶</button>
+          <button type="button" class="btn small danger" data-del>Remove</button>
+        </div></div>`).join('')}</div>`;
+  }
+  box.innerHTML = html;
+
+  [hero, box].forEach(el => el.querySelectorAll('[data-view]').forEach(b => b.addEventListener('click', () => openPhotoViewer(ps, Number(b.dataset.view)))));
+  const arrange = document.getElementById('arrange');
+  if (arrange) { arrange.addEventListener('click', () => { arranging = !arranging; renderPhotos(); }); }
+  box.querySelectorAll('[data-pid]').forEach(card => {
+    const id = Number(card.dataset.pid);
+    const act = async (action, payload, msg) => {
+      try {
+        r.photos = (await apiPost(action, { id, ...payload })).photos;
+        renderPhotos();
+        if (msg) { toast(msg); }
+      } catch (e) { toast(e.message); }
+    };
+    card.querySelector('[data-cap]').addEventListener('change', async ev => {
+      try {
+        r.photos = (await apiPost('setPhotoCaption', { id, caption: ev.target.value })).photos;
+        toast('Caption saved');
+      } catch (e) { toast(e.message); }
+    });
+    const first = card.querySelector('[data-first]');
+    if (first) { first.addEventListener('click', () => act('movePhoto', { first: true }, 'Cover changed')); }
+    card.querySelectorAll('[data-move]').forEach(b => b.addEventListener('click', () => act('movePhoto', { direction: Number(b.dataset.move) })));
+    card.querySelector('[data-del]').addEventListener('click', () => {
+      if (!confirm('Remove this photo from the recipe, for everyone?')) { return; }
+      act('deletePhoto', {}, 'Photo removed');
+    });
+  });
+}
+
+async function addRecipePhotos(files, btn) {
+  const label = btn.textContent;
+  btn.disabled = true;
+  let added = 0;
+  for (let k = 0; k < files.length; k++) {
+    btn.textContent = files.length > 1 ? `Adding ${k + 1} of ${files.length}…` : 'Adding photo…';
+    try {
+      r.photos = (await uploadPhoto('uploadRecipePhoto', { recipeId: r.id }, files[k])).photos;
+      added++;
+      renderPhotos();
+    } catch (e) { toast(e.message); }
+  }
+  btn.textContent = label;
+  btn.disabled = false;
+  if (added) { toast(added === 1 ? 'Photo added' : `${added} photos added`); }
+}
+
+// Photos chosen for a note that hasn't been saved yet.
+function renderPendingNotePhotos() {
+  const box = document.getElementById('note-pending');
+  box.innerHTML = pendingNotePhotos.map((x, i) => `<span class="np"><img src="${x.url}" alt="Chosen photo ${i + 1}">
+    <button type="button" class="rm" data-unpick="${i}" aria-label="Don't add photo ${i + 1}">✕</button></span>`).join('');
+  box.querySelectorAll('[data-unpick]').forEach(b => b.addEventListener('click', () => {
+    const [gone] = pendingNotePhotos.splice(Number(b.dataset.unpick), 1);
+    URL.revokeObjectURL(gone.url);
+    renderPendingNotePhotos();
+  }));
+  document.getElementById('note-add-photo').classList.toggle('hidden', pendingNotePhotos.length >= NOTE_PHOTO_MAX);
+}
+function clearPendingNotePhotos() {
+  pendingNotePhotos.forEach(x => URL.revokeObjectURL(x.url));
+  pendingNotePhotos = [];
+  renderPendingNotePhotos();
+}
+
+// While editing your own note: remove photos or add more (saved straight away).
+function renderEditNotePhotos(box, n) {
+  box.innerHTML = `<div class="note-photos">${n.photos.map((p, i) => `<span class="np"><img src="${photoSrc(p.thumb)}" alt="Photo ${i + 1}">
+      <button type="button" class="rm" data-rm="${p.id}" aria-label="Remove photo ${i + 1}">✕</button></span>`).join('')}</div>
+    ${n.photos.length < NOTE_PHOTO_MAX ? '<button type="button" class="link-btn" data-add-np>📷 Add a photo</button>' : ''}`;
+  box.querySelectorAll('[data-rm]').forEach(b => b.addEventListener('click', async () => {
+    if (!confirm('Remove this photo from your note?')) { return; }
+    try {
+      Object.assign(n, (await apiPost('deleteNotePhoto', { id: Number(b.dataset.rm) })).note);
+      renderEditNotePhotos(box, n);
+    } catch (e) { toast(e.message); }
+  }));
+  const add = box.querySelector('[data-add-np]');
+  if (add) {
+    add.addEventListener('click', () => pickPhotos(async files => {
+      for (const file of files.slice(0, NOTE_PHOTO_MAX - n.photos.length)) {
+        add.textContent = 'Adding photo…';
+        try { Object.assign(n, (await uploadPhoto('uploadNotePhoto', { noteId: n.id }, file)).note); } catch (e) { toast(e.message); }
+      }
+      renderEditNotePhotos(box, n);
+    }));
+  }
+}
+
 // ---- Family notes -------------------------------------------------------------
 
 function noteHtml(n) {
   const canRemove = n.mine || (r.canManage && n.visibility === 'shared');
   return `<div class="note${n.visibility === 'private' ? ' private' : ''}" data-note="${n.id}">
     <div class="note-body">${formatText(n.text)}</div>
+    ${n.photos && n.photos.length ? `<div class="note-photos">${n.photos.map((p, i) => `<button type="button" class="view" data-np="${i}" aria-label="View photo ${i + 1}"><img src="${photoSrc(p.thumb)}" alt="" loading="lazy"></button>`).join('')}</div>` : ''}
     <div class="by">${escapeHtml(n.author.name)} · ${formatDateTime(n.createdAt)}${n.updatedAt !== n.createdAt ? ' (edited)' : ''}
       ${n.visibility === 'private' ? ' · <strong>Private — only you can see this</strong>' : ''}
       ${n.mine ? ' · <button type="button" class="link-btn no-print" data-note-edit>Edit</button>' : ''}
@@ -211,6 +345,7 @@ function renderNotes() {
   box.innerHTML = r.notes.length ? r.notes.map(noteHtml).join('') : '<p class="muted no-print" style="margin:0">No notes yet.</p>';
   box.querySelectorAll('[data-note]').forEach(el => {
     const n = r.notes.find(x => x.id === Number(el.dataset.note));
+    el.querySelectorAll('[data-np]').forEach(b => b.addEventListener('click', () => openPhotoViewer(n.photos, Number(b.dataset.np))));
     const del = el.querySelector('[data-note-del]');
     if (del) {
       del.addEventListener('click', async () => {
@@ -226,10 +361,13 @@ function renderNotes() {
     if (edit) {
       edit.addEventListener('click', () => {
         el.innerHTML = `<textarea rows="3" maxlength="5000" aria-label="Edit note">${escapeHtml(n.text)}</textarea>
+          <div class="edit-photos"></div>
           <label class="check" style="margin:6px 0"><input type="checkbox"${n.visibility === 'private' ? ' checked' : ''}> Only me</label>
-          <div class="actions" style="margin-top:6px"><button type="button" class="btn small">Save</button>
-            <button type="button" class="btn small secondary">Cancel</button></div>`;
-        const [save, cancel] = el.querySelectorAll('button');
+          <div class="actions" style="margin-top:6px"><button type="button" class="btn small" data-save>Save</button>
+            <button type="button" class="btn small secondary" data-cancel>Cancel</button></div>`;
+        const save = el.querySelector('[data-save]');
+        const cancel = el.querySelector('[data-cancel]');
+        renderEditNotePhotos(el.querySelector('.edit-photos'), n);
         el.querySelector('textarea').focus();
         cancel.addEventListener('click', renderNotes);
         save.addEventListener('click', async () => {
@@ -247,6 +385,13 @@ function renderNotes() {
 
 function wireNotes() {
   const form = document.getElementById('note-form');
+  renderPendingNotePhotos();
+  document.getElementById('note-add-photo').addEventListener('click', () => pickPhotos(files => {
+    const room = NOTE_PHOTO_MAX - pendingNotePhotos.length;
+    if (files.length > room) { toast(`A note can have up to ${NOTE_PHOTO_MAX} photos`); }
+    for (const file of files.slice(0, Math.max(0, room))) { pendingNotePhotos.push({ file, url: URL.createObjectURL(file) }); }
+    renderPendingNotePhotos();
+  }));
   form.addEventListener('submit', async ev => {
     ev.preventDefault();
     const btn = form.querySelector('button[type="submit"]');
@@ -254,11 +399,20 @@ function wireNotes() {
     try {
       const res = await apiPost('addNote', { recipeId: r.id, text: document.getElementById('note-text').value,
         visibility: form.querySelector('input[name="vis"]:checked').value });
-      r.notes.push(res.note);
+      const note = res.note;
+      r.notes.push(note);
       document.getElementById('note-text').value = '';
       form.querySelectorAll('.field-error').forEach(e => { e.textContent = ''; });
+      const files = pendingNotePhotos.map(x => x.file);
+      clearPendingNotePhotos();
+      let failed = 0;
+      for (let k = 0; k < files.length; k++) {
+        btn.textContent = `Adding photo ${k + 1} of ${files.length}…`;
+        try { Object.assign(note, (await uploadPhoto('uploadNotePhoto', { noteId: note.id }, files[k])).note); } catch (e) { failed++; toast(e.message); }
+      }
+      btn.textContent = 'Add note';
       renderNotes();
-      toast(res.note.visibility === 'private' ? 'Private note added' : 'Note added');
+      if (!failed) { toast(note.visibility === 'private' ? 'Private note added' : 'Note added'); }
     } catch (e) {
       showFieldError(form, e, null);
     }
@@ -353,7 +507,8 @@ async function sendPdf(btn) {
   btn.textContent = 'Making PDF…';
   try {
     const scaled = Math.abs(factor() - 1) > 1e-9;
-    const result = await sendRecipePdf(r, factor(), scaled ? scaleLabel() : '');
+    const cover = r.photos.length ? { data: await photoDataUrl(r.photos[0].full), width: r.photos[0].width, height: r.photos[0].height } : null;
+    const result = await sendRecipePdf(r, factor(), scaled ? scaleLabel() : '', cover && cover.data ? cover : null);
     if (result === 'downloaded') { toast('PDF downloaded — attach it to a text or email'); }
   } catch (e) {
     toast(e.message || 'Couldn\'t make the PDF');
