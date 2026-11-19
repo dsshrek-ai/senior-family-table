@@ -93,7 +93,7 @@ Each source line is `{ingredient, quantity, unit, notes}`. Mapping:
 | -------------------------------------- | ----------------------------------------------------- | ------------------------ |
 | Refried Beans with Lard (Instant Pot)  | Chili powder and cumin quantities are stored as the date `2026-01-02` — a spreadsheet turned "1/2" into January 2 | **Decided:** import as ½ Tbsp each |
 | (lemon juice line)                     | `4` · unit `the` · note `tsp` — unit and note swapped | Import as 4 tsp fresh lemon juice |
-| Rice Pilaf (DUP 2021)                  | Title and a `DUP` tag mark it as a duplicate          | **Decided:** skip it — 189 recipes import |
+| Rice Pilaf (DUP 2021), Berry Vinaigrette (2024 DUP) | "DUP" looked like "duplicate" but means **Daughters of Utah Pioneers**; neither has a twin anywhere | **Decided:** import both — all 190 recipes import |
 | Cilantro "a lot!"                      | Unit is a comment                                     | No quantity; note kept   |
 | 46 recipes tagged **Nourish Forward**  | Tag from the retired app                              | **Decided:** keep as a tag |
 
@@ -111,7 +111,7 @@ report of all of them.
 2. Real run: everything in **one transaction** — either all 190 recipes import or none do.
 3. **Re-runnable safely:** each import record stores `source_ref = senior-family-cookbook:<id>`
    (unique), so a second run skips recipes already imported instead of duplicating them.
-4. Verify: 189 recipes in the new cookbook, ingredient and step counts match the
+4. Verify: 190 recipes in the new cookbook, ingredient and step counts match the
    source, spot-check five recipes side by side with the old app.
 
 ## 8. After the import

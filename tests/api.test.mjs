@@ -73,11 +73,11 @@ await test('POST-only action via GET → 405', async () => {
 
 // ---- Imported cookbook -----------------------------------------------------
 
-await test('owner sees the imported cookbook with 189 recipes', async () => {
+await test('owner sees the imported cookbook with 190 recipes', async () => {
   const r = await call('owner', 'listCookbooks');
   const book = r.data.cookbooks.find(c => c.id === familyBook);
   assert.ok(book, 'cookbook missing');
-  assert.equal(book.recipeCount, 189);
+  assert.equal(book.recipeCount, 190);
   assert.equal(book.role, 'owner');
 });
 await test('imported recipe reads back with fixed quantities and tags', async () => {
@@ -211,7 +211,7 @@ await test('admin import over the API is safe to repeat', async () => {
   const r = await call('owner', 'adminImportSeniorFamily', { body: { dryRun: true } });
   assert.equal(r.status, 200);
   assert.equal(r.data.report.imported, 0);
-  assert.equal(r.data.report.alreadyImported, 189);
+  assert.equal(r.data.report.alreadyImported, 190);
 });
 
 // ----------------------------------------------------------------------------

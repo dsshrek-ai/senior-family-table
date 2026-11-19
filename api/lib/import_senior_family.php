@@ -14,8 +14,9 @@ const SFC_PARSER_VERSION = 'sfc-migrate-1';
 const SFC_COOKBOOK_TITLE = 'Senior Family Cookbook';
 const SFC_COOKBOOK_DESCRIPTION = 'The family recipes, imported from the original Senior Family Cookbook app.';
 
-// Confirmed by the owner on 2026-11-19.
-const SFC_SKIP_TITLES = ['Rice Pilaf (DUP 2021)'];
+// Recipes to leave out by exact title. Empty: "DUP" in a title means Daughters of Utah
+// Pioneers, not duplicate — both DUP recipes are imported (owner, 2026-11-19).
+const SFC_SKIP_TITLES = [];
 // A spreadsheet turned "1/2" into the date 2026-01-02 on these lines; owner confirmed ½ Tbsp.
 const SFC_QUANTITY_FIXES = [
   'refried beans with lard (instant pot)|chili powder' => 0.5,
@@ -56,7 +57,7 @@ function mapSeniorFamilyRecipe(array $src): array {
     return $out;
   }
   if (in_array($title, SFC_SKIP_TITLES, true)) {
-    $out['skip'] = 'duplicate — skipped by owner decision';
+    $out['skip'] = 'left out by owner decision';
     return $out;
   }
   if ($title === '') {
