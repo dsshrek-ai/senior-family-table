@@ -1,4 +1,6 @@
-# Recipe Book — Application Specification
+# The Senior Family Table — Application Specification
+
+> Originally titled "Recipe Book"; renamed The Senior Family Table on 2026-11-19.
 
 **Status:** Requirements agreed; implementation not yet started  
 **Version:** 1.0  

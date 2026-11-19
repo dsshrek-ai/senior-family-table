@@ -1,6 +1,6 @@
-# Recipe Book
+# The Senior Family Table
 
-A multi-user recipe book on MyDataWorld: recipes shared across several cookbooks without
+A multi-user family recipe book on MyDataWorld: recipes shared across several cookbooks without
 copies, co-owned recipes, paste-text import with review, photos, serving/batch scaling, and
 purpose-based shopping lists that work like the Senior Family Cookbook's — now shared and
 synced between devices.
@@ -13,7 +13,8 @@ No meal planner, by design.
 | ---- | ---------- |
 | [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) | Application specification v1.0 |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Stack, permissions, shopping lists (§6), import, photos, backup |
-| [api/schema.sql](api/schema.sql) | Draft `rb_` tables for the MyDataWorld database |
+| [docs/IMPORT-SENIOR-FAMILY.md](docs/IMPORT-SENIOR-FAMILY.md) | Plan for importing the Senior Family Cookbook recipes (not Living Lean) |
+| [api/schema.sql](api/schema.sql) | Draft `sft_` tables for the MyDataWorld database |
 
 Stack: static HTML + vanilla JS on GitHub Pages; PHP 8 API at
-`seniorfamily.org/recipe-book-api/`; My Apps Hub sign-in (app key `recipe-book`).
+`seniorfamily.org/senior-family-table-api/`; My Apps Hub sign-in (app key `senior-family-table`).

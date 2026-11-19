@@ -1,4 +1,4 @@
-# Recipe Book — Architecture (Foundation phase)
+# The Senior Family Table — Architecture (Foundation phase)
 
 **Version:** 0.1 (draft)
 **Date:** 2026-11-19
@@ -20,9 +20,9 @@ No meal planner — not in Version 1 and not on the roadmap (REQUIREMENTS.md §1
 | --------------- | ----------------------------------------------------------------------------- |
 | Front end       | Multi-page static HTML + vanilla JS, no build step, served from GitHub Pages |
 | API             | Single-file PHP 8 API (`api/api.php`, action router, mysqli) on Turbify      |
-| API location    | `https://seniorfamily.org/recipe-book-api/api.php`                           |
-| Database        | The **MyDataWorld** MySQL database, tables prefixed `rb_`                    |
-| Sign-in         | **My Apps Hub SSO** — shared `users`/`sessions`, `app_access` grant for app key `recipe-book` |
+| API location    | `https://seniorfamily.org/senior-family-table-api/api.php`                           |
+| Database        | The **MyDataWorld** MySQL database, tables prefixed `sft_`                    |
+| Sign-in         | **My Apps Hub SSO** — shared `users`/`sessions`, `app_access` grant for app key `senior-family-table` |
 | Photos          | Files outside `public_html`, served only through the API (§8)                |
 | Live updates    | Short-interval polling (§6.7) — shared hosting can't hold open connections   |
 
@@ -39,12 +39,12 @@ limits. The client is written so polling could later be swapped for SSE without 
 
 ## 2. Accounts and invitations
 
-- Everyone signs in through the Hub (`users`, `sessions`). Recipe Book stores no passwords.
-- `requireUser()` checks the session and the `recipe-book` `app_access` grant, the same way
+- Everyone signs in through the Hub (`users`, `sessions`). The Senior Family Table stores no passwords.
+- `requireUser()` checks the session and the `senior-family-table` `app_access` grant, the same way
   Quill Clock's API does.
 - **Invitations are by Hub username.** The invitee must already have a Hub account (decision
   from REQUIREMENTS.md §16: *recipients must register first*). Inviting someone to a cookbook,
-  recipe or shopping list also grants them `recipe-book` access if they don't have it.
+  recipe or shopping list also grants them `senior-family-table` access if they don't have it.
 - Account recovery is the Hub's existing password reset, not something this app builds.
 - Display names come from `users.display_name`; never show another user's username/email
   to people who don't already share something with them.
@@ -57,9 +57,9 @@ limits. The client is written so polling could later be swapped for SSE without 
 
 | Resource      | Roles                          | Table                     |
 | ------------- | ------------------------------ | ------------------------- |
-| Cookbook      | `owner`, `editor`, `viewer`    | `rb_cookbook_members`     |
-| Recipe        | `co_owner`, `editor`, `viewer` | `rb_recipe_members`       |
-| Shopping list | `owner`, `editor`, `viewer`    | `rb_shopping_list_members`|
+| Cookbook      | `owner`, `editor`, `viewer`    | `sft_cookbook_members`     |
+| Recipe        | `co_owner`, `editor`, `viewer` | `sft_recipe_members`       |
+| Shopping list | `owner`, `editor`, `viewer`    | `sft_shopping_list_members`|
 
 ### 3.2 The rules (implemented once, as SQL helpers in `api.php`, used by every action)
 
@@ -108,20 +108,20 @@ visibleNotes(u, r)        = notes on r WHERE visibility = 'shared' OR author = u
 
 ## 4. Recipes and cookbooks
 
-- `rb_recipes` is the master; `rb_cookbook_recipes` links it into cookbooks with a unique
+- `sft_recipes` is the master; `sft_cookbook_recipes` links it into cookbooks with a unique
   `(cookbook_id, recipe_id)` pair. Removing a link never touches the recipe.
-- Ingredients (`rb_recipe_ingredients`), methods (`rb_recipe_methods`) and steps
-  (`rb_recipe_steps`) are child rows. A step may belong to a method ("Instant Pot",
+- Ingredients (`sft_recipe_ingredients`), methods (`sft_recipe_methods`) and steps
+  (`sft_recipe_steps`) are child rows. A step may belong to a method ("Instant Pot",
   "Slow Cooker"), or to no method (shared steps).
 - Ingredient sections ("For serving", "For the sauce") are a `section` text on the
   ingredient row.
 - **Saving a recipe** is one transaction that updates child rows **in place by ID** (inserting
   new lines, deleting only lines the user removed) and writes a revision snapshot (§7.3).
-  Ingredient row IDs must stay stable because shopping lists point at them (§6.4). `rb_recipes.version` gives optimistic locking: a save based on an old
+  Ingredient row IDs must stay stable because shopping lists point at them (§6.4). `sft_recipes.version` gives optimistic locking: a save based on an old
   version is refused and the editor shows what changed.
 - **Batch definition:** `yield_quantity` + `yield_unit` (e.g. 1 pan) alongside `servings`
   (e.g. 12). Either can drive scaling (§6.1).
-- **Saved scale** ("make 2 pans"): stored per user in `rb_recipe_user_state.saved_scale`,
+- **Saved scale** ("make 2 pans"): stored per user in `sft_recipe_user_state.saved_scale`,
   never on the master.
 - **Search:** titles, ingredient names/lines, tags, and notes the user can see — all through
   §3.2. MySQL `LIKE` over normalized columns is enough at family scale; FULLTEXT can be added
@@ -131,7 +131,7 @@ visibleNotes(u, r)        = notes on r WHERE visibility = 'shared' OR author = u
 
 ## 5. Categories and tags
 
-- One table, `rb_categories`, with `kind` (`category`, `method`, `descriptor`) and `scope`
+- One table, `sft_categories`, with `kind` (`category`, `method`, `descriptor`) and `scope`
   (`system`, `user`, `cookbook`).
 - System entries seeded from REQUIREMENTS.md §7 (Main Dishes … Tested & Approved).
 - A unique key on `(scope, owner, normalized_name)` prevents "Soup"/"soup " duplicates.
@@ -177,7 +177,7 @@ because live updates arrive in the background (§6.7).
 
 ### 6.3 What changes
 
-| Senior Family Cookbook                         | Recipe Book                                                    |
+| Senior Family Cookbook                         | The Senior Family Table                                                    |
 | ---------------------------------------------- | -------------------------------------------------------------- |
 | One list per device, built from **favorites**  | Many lists, one per **purpose**; each has its own **recipes on this list** with their own scale |
 | Stored in the browser                          | Stored on the server; shared lists sync between people (§6.7)  |
@@ -197,7 +197,7 @@ Favorites still exist (personal ♥ on recipes), but they no longer drive the li
   pre-selected, or **New list…**), confirm the scale (pre-filled from the recipe screen's
   servings or batches), and untick the ingredients you already have — the Senior Family
   "check off" step, now in the same sheet.
-- That recipe is stored as a row in `rb_shopping_list_recipes` (scale + excluded ingredient IDs)
+- That recipe is stored as a row in `sft_shopping_list_recipes` (scale + excluded ingredient IDs)
   and its ingredients are **merged into the existing items** (§6.5). Edits already made to
   the list are kept, not rebuilt.
 - **Merging rule into edited items:** a new contribution merges into an existing item only
@@ -205,7 +205,7 @@ Favorites still exist (personal ♥ on recipes), but they no longer drive the li
   added in the item's own unit and rounded to a friendly fraction. Otherwise it becomes its
   own row, so nothing is silently lost.
 - **Removing a recipe from a list** removes its contribution: items it alone produced are
-  deleted, merged items have its share subtracted (recorded in `rb_shopping_item_sources`).
+  deleted, merged items have its share subtracted (recorded in `sft_shopping_item_sources`).
   If someone hand-edited that item since, it is left alone and flagged "check quantity".
 - Several recipes can be added at once from a cookbook's recipe cards (multi-select →
   **Add to shopping list**).
@@ -234,13 +234,13 @@ contribution is kept in the source rows.
 
 - **Department:** the catalog ingredient's default department if it has one, otherwise the
   ported keyword guesser. A manual pick sets `department_manual = 1` and is never overwritten.
-- **Store:** optional per item, from `rb_stores` (system-seeded: Costco, Sam's Club, Walmart,
+- **Store:** optional per item, from `sft_stores` (system-seeded: Costco, Sam's Club, Walmart,
   plus user-added stores). Blank = **Unassigned**. Changing it never touches recipes.
 - **Assigned to:** optional, any member of the list.
 
 ### 6.7 Sync between devices
 
-- Every change to a list bumps `rb_shopping_lists.change_seq`; each changed item records the
+- Every change to a list bumps `sft_shopping_lists.change_seq`; each changed item records the
   seq it was changed at (`changed_seq`). Deleted items are soft-deleted so the deletion syncs.
 - The open list calls `listChanges&listId=…&since=<seq>`, which returns only items changed
   after that seq (usually none — a tiny response).
@@ -274,7 +274,7 @@ contribution is kept in the source rows.
   "to taste"/"as needed" (no quantity — never invented).
 - Every line it isn't sure about is flagged on the review screen. Nothing saves without the
   user pressing **Save**. The full pasted text, the parser's output and the user's corrections
-  go to `rb_recipe_imports`.
+  go to `sft_recipe_imports`.
 - **Duplicate check** before save: recipes the user can already see with a similar title
   (normalized title match, or most words shared) or heavily overlapping ingredients. Each
   match offers **Add this existing recipe to the cookbook instead**.
@@ -282,21 +282,21 @@ contribution is kept in the source rows.
 
 ### 7.2 Ingredient catalog
 
-- `rb_ingredients` (canonical names, default department, dimension) and
-  `rb_ingredient_aliases`.
+- `sft_ingredients` (canonical names, default department, dimension) and
+  `sft_ingredient_aliases`.
 - Scopes: `system` (shared by everyone), `user` (only you). Matching only uses **exact
   normalized alias matches** — no fuzzy matching — so "garlic powder" can never land on
   "garlic".
 - Anyone can create a user-scoped ingredient or alias, which only affects their own matching.
   Proposing one for everyone sets its status to `pending`; an **app admin**
-  (`rb_admins`) approves it into the `system` scope.
+  (`sft_admins`) approves it into the `system` scope.
 - The catalog starts with the common ingredients from the Senior Family department keyword
   list, with obvious aliases (ground beef ← hamburger, hamburger meat, beef, ground).
 
 ### 7.3 Revisions
 
 - Every recipe save writes a JSON snapshot (all recipe fields, ingredients, methods, steps,
-  tags) to `rb_recipe_revisions` with author and time.
+  tags) to `sft_recipe_revisions` with author and time.
 - **Restore** = save that snapshot as a new revision. History is never rewritten.
 - Notes, photos and personal data are not in revisions (they have their own rows).
 
@@ -321,7 +321,7 @@ contribution is kept in the source rows.
 - **Export (per user):** a ZIP from **Settings → Export** with a documented JSON file (every
   cookbook, recipe, list and tag the user can see, and their own private notes — never anyone
   else's) plus the photos. Format documented in `docs/EXPORT-FORMAT.md` (Phase 6).
-- **Backup (whole app):** a cPanel cron job dumps the `rb_` tables nightly and copies the photo
+- **Backup (whole app):** a cPanel cron job dumps the `sft_` tables nightly and copies the photo
   folder, keeping 14 daily + 12 monthly copies. A restore procedure is written and tested
   before launch (Phase 6).
 - **Retention (decided):** soft-deleted recipes, cookbooks and list items purged after 30 days;
@@ -339,7 +339,7 @@ contribution is kept in the source rows.
   never raw HTML.
 - Pasted recipe text is just data: parsed, displayed escaped, never evaluated.
 - CORS limited to the GitHub Pages origin; rate limits on uploads and invites.
-- Audit events (`rb_audit_events`) for sharing changes, role changes, removals, deletions,
+- Audit events (`sft_audit_events`) for sharing changes, role changes, removals, deletions,
   restores and revision restores.
 - **Required tests (Phase 6):** for every read action, a second user guessing IDs gets
   "not found" — recipes, cookbooks, notes, photos (including signed URLs with a forged sig),
@@ -376,7 +376,7 @@ one tap from anywhere.
 - [ ] `upload_max_filesize` / `post_max_size` ≥ 16 MB.
 - [ ] A writable photo directory outside `public_html`.
 - [ ] cPanel cron for nightly backup and the 30-day purge.
-- [ ] Register `recipe-book` in the Hub's `apps` table (tile, SSO on).
+- [ ] Register `senior-family-table` in the Hub's `apps` table (tile, SSO on).
 
 ---
 
@@ -400,8 +400,9 @@ one tap from anywhere.
 
 Follows REQUIREMENTS.md §15:
 
-1. **Foundation:** Hub registration, `rb_` schema, `requireUser` + permission helpers with
-   tests, cookbook CRUD.
+1. **Foundation:** Hub registration, `sft_` schema, `requireUser` + permission helpers with
+   tests, cookbook CRUD, and the **Senior Family Cookbook import**
+   ([IMPORT-SENIOR-FAMILY.md](IMPORT-SENIOR-FAMILY.md)) so real recipes are there from the start.
 2. **Recipe library:** cookbook/recipe screens, linking, recipe editor, sharing.
 3. **Importer and organization:** parser + review, catalog, tags, photos, notes, revisions.
 4. **Scaling and shopping:** scaling, lists, add-from-recipe, Senior Family edit/shopping modes,
