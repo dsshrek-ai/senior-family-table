@@ -11,6 +11,7 @@
 <main><p class="muted">Loading…</p></main>
 <script src="js/api.js"></script>
 <script src="js/app.js"></script>
+<script src="js/addtolist.js"></script>
 <script>
 const main = renderShell('');
 const bookId = Number(param('id'));
@@ -18,6 +19,8 @@ let book = null;
 let recipes = [];
 let filterText = '';
 let favoritesOnly = false;
+let selecting = false;       // choosing several recipes for a shopping list
+const selected = new Set();
 
 const canEdit = () => book && (book.role === 'owner' || book.role === 'editor');
 
@@ -33,11 +36,12 @@ function recipeRows(list) {
   }
   return `<ul class="recipe-list">${list.map(r => `
     <li>
+      ${selecting ? `<label class="check" style="padding:0 10px"><input type="checkbox" data-pick="${r.id}"${selected.has(r.id) ? ' checked' : ''} aria-label="Choose ${escapeHtml(r.title)}"></label>` : `
       <button type="button" class="icon-btn fav" data-fav="${r.id}" aria-pressed="${r.favorite}"
-        aria-label="${r.favorite ? 'Remove from' : 'Add to'} favorites: ${escapeHtml(r.title)}">${r.favorite ? '★' : '☆'}</button>
+        aria-label="${r.favorite ? 'Remove from' : 'Add to'} favorites: ${escapeHtml(r.title)}">${r.favorite ? '★' : '☆'}</button>`}
       <a href="recipe.html?id=${r.id}&cookbook=${bookId}"><span class="title">${escapeHtml(r.title)}</span>
         <span class="sub">${r.tags.slice(0, 6).map(escapeHtml).join(' · ')}</span></a>
-      ${canEdit() ? `<button type="button" class="btn small secondary" data-unlink="${r.id}" aria-label="Remove ${escapeHtml(r.title)} from this cookbook">Remove</button>` : ''}
+      ${canEdit() && !selecting ? `<button type="button" class="btn small secondary" data-unlink="${r.id}" aria-label="Remove ${escapeHtml(r.title)} from this cookbook">Remove</button>` : ''}
     </li>`).join('')}</ul>`;
 }
 
@@ -77,14 +81,25 @@ function render() {
     </form>
     <div class="toolbar">
       <input type="search" id="filter" placeholder="Filter by title or tag" value="${escapeHtml(filterText)}" aria-label="Filter recipes" style="flex:1;min-width:180px">
+      <button type="button" class="btn secondary small" id="pick-btn" aria-pressed="${selecting}">${selecting ? 'Cancel choosing' : '🛒 Choose for a list'}</button>
       <span class="seg"><button type="button" data-favs="0" class="${favoritesOnly ? '' : 'active'}">All</button><button type="button" data-favs="1" class="${favoritesOnly ? 'active' : ''}">★ Favorites</button></span>
     </div>
+    ${selecting ? `<div class="banner sticky-save" style="position:sticky;top:0;z-index:6" id="pick-bar">
+      <span id="pick-count">${selected.size} chosen</span> ·
+      <button type="button" class="btn small" id="pick-add"${selected.size ? '' : ' disabled'}>Add to shopping list</button></div>` : ''}
+    <section class="card hidden" id="atl-box" aria-label="Add to shopping list"></section>
     <div class="card" id="list">${recipeRows(shownRecipes())}</div>`;
   wire();
 }
 
 function wireList() {
   const list = document.getElementById('list');
+  list.querySelectorAll('[data-pick]').forEach(c => c.addEventListener('change', () => {
+    const id = Number(c.dataset.pick);
+    if (c.checked) { selected.add(id); } else { selected.delete(id); }
+    document.getElementById('pick-count').textContent = `${selected.size} chosen`;
+    document.getElementById('pick-add').disabled = selected.size === 0;
+  }));
   list.querySelectorAll('[data-fav]').forEach(b => b.addEventListener('click', async () => {
     const r = recipes.find(x => x.id === Number(b.dataset.fav));
     try {
@@ -108,6 +123,20 @@ function wireList() {
 
 function wire() {
   wireList();
+  document.getElementById('pick-btn').addEventListener('click', () => {
+    selecting = !selecting;
+    if (!selecting) { selected.clear(); }
+    render();
+  });
+  const pickAdd = document.getElementById('pick-add');
+  if (pickAdd) {
+    pickAdd.addEventListener('click', () => {
+      const chosen = recipes.filter(r => selected.has(r.id)).map(r => ({ id: r.id, title: r.title }));
+      const box = document.getElementById('atl-box');
+      showAddToList(box, chosen);
+      box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  }
   const filter = document.getElementById('filter');
   filter.addEventListener('input', () => {
     filterText = filter.value;

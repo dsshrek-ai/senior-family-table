@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Shopping List | The Senior Family Table</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27%3E%3Ctext y=%27.9em%27 font-size=%2790%27%3E%F0%9F%8D%BD%EF%B8%8F%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main><p class="muted">Loading…</p></main>
+<script src="js/api.js"></script>
+<script src="js/app.js"></script>
+<script>
+// The Senior Family Cookbook's shopping list (edit mode + shopping mode), shared and synced.
+const main = renderShell('lists.html');
+const listId = Number(param('id'));
+const GROUP_KEY = 'sftListGroup';
+const POLL_SHOP_MS = 4000;
+const POLL_EDIT_MS = 15000;
+
+let L = null;               // list: id, title, status, role
+let items = new Map();      // id → item
+let recipes = [];
+let members = [];
+let stores = [];
+let departments = [];
+let seq = 0;
+let mode = 'edit';          // 'edit' | 'shop'
+let groupBy = 'dept';       // 'dept' | 'store'
+try { groupBy = localStorage.getItem(GROUP_KEY) === 'store' ? 'store' : 'dept'; } catch (e) { /* default */ }
+const moreOpen = new Set();
+const pending = new Map();  // updates held back while their row has focus
+let pendingRender = false;
+let pollTimer = null;
+let syncOk = true;
+
+const canEdit = () => L && L.role !== 'viewer';
+const storeName = id => (stores.find(s => s.id === id) || {}).name || 'Unassigned';
+const memberName = id => (members.find(m => m.id === id) || {}).name || '';
+const deptIndex = d => { const i = departments.indexOf(d); return i < 0 ? departments.length : i; };
+const byDeptThenPosition = (a, b) => deptIndex(a.department) - deptIndex(b.department) || a.position - b.position || a.id - b.id;
+
+// [{ title, items }] in Senior Family department order, or by store (Unassigned last).
+function grouped(list) {
+  const out = [];
+  if (groupBy === 'store') {
+    const order = [...stores.map(s => s.id), null];
+    for (const sid of order) {
+      const g = list.filter(i => (i.storeId ?? null) === sid).sort(byDeptThenPosition);
+      if (g.length) { out.push({ title: sid === null ? 'Unassigned' : storeName(sid), items: g }); }
+    }
+    const known = new Set(order);
+    const orphans = list.filter(i => !known.has(i.storeId ?? null));
+    if (orphans.length) { out.push({ title: 'Other stores', items: orphans.sort(byDeptThenPosition) }); }
+  } else {
+    for (const d of departments) {
+      const g = list.filter(i => (i.department || 'Other') === d).sort((a, b) => a.position - b.position || a.id - b.id);
+      if (g.length) { out.push({ title: d, items: g }); }
+    }
+  }
+  return out;
+}
+
+// ---- Page ---------------------------------------------------------------
+
+function renderPage() {
+  document.title = `${L.title} | The Senior Family Table`;
+  if (!canEdit()) { mode = 'shop'; }
+  const owner = L.role === 'owner';
+  main.innerHTML = `
+    <p class="no-print"><a href="lists.html">← Shopping Lists</a></p>
+    <div class="toolbar" style="margin-bottom:6px"><h1 style="margin:0">${escapeHtml(L.title)}</h1><span class="spacer"></span>
+      <span class="sync" id="sync" aria-live="polite"></span></div>
+    ${L.status === 'completed' ? `<div class="banner">This list is marked done.${canEdit() ? ' <button type="button" class="link-btn" id="reopen">Reopen it</button>' : ''}</div>` : ''}
+    ${!canEdit() ? '<div class="banner">You can view this list. Ask its owner to make you an editor to check things off.</div>' : ''}
+    <div class="toolbar no-print">
+      ${canEdit() ? `<button type="button" class="btn" id="mode-btn">${mode === 'shop' ? '✎ Back to editing' : '🛒 Start shopping'}</button>` : ''}
+      <span class="seg" role="group" aria-label="Group items"><button type="button" data-group="dept" class="${groupBy === 'dept' ? 'active' : ''}">By department</button><button type="button" data-group="store" class="${groupBy === 'store' ? 'active' : ''}">By store</button></span>
+      <span class="spacer"></span>
+      <a class="btn secondary small" href="share.html?type=list&id=${listId}">${owner ? 'Share' : 'People'}</a>
+      <button type="button" class="btn secondary small" id="print">Print</button>
+      <details style="position:relative"><summary class="btn secondary small" style="list-style:none">More ▾</summary>
+        <div class="card" style="position:absolute;right:0;z-index:10;min-width:220px;display:grid;gap:6px;margin-top:6px">
+          ${owner ? '<button type="button" class="btn small secondary" id="rename">Rename</button>' : ''}
+          ${canEdit() && L.status === 'active' ? '<button type="button" class="btn small secondary" id="complete">Mark as done</button>' : ''}
+          <button type="button" class="btn small secondary" id="copy">Make a fresh copy</button>
+          ${owner ? '<button type="button" class="btn small danger" id="delete">Delete list</button>' : ''}
+        </div></details>
+    </div>
+    <details class="card no-print" id="recipes-panel"${recipes.length ? '' : ' open'}>
+      <summary>Recipes on this list (${recipes.length})</summary>
+      <div id="recipes-body" style="margin-top:8px"></div>
+    </details>
+    <div class="card" id="items"></div>`;
+  wirePage();
+  renderRecipes();
+  renderItems();
+  renderSync();
+}
+
+function renderSync() {
+  const el = document.getElementById('sync');
+  if (!el) { return; }
+  el.className = `sync${syncOk ? '' : ' off'}`;
+  el.textContent = syncOk ? (members.length > 1 ? `Shared with ${members.length - 1} · stays in sync` : '') : 'Offline — retrying…';
+}
+
+function renderRecipes() {
+  const box = document.getElementById('recipes-body');
+  if (!recipes.length) {
+    box.innerHTML = `<p class="muted" style="margin:0">Open any recipe and choose <strong>🛒 Add to shopping list</strong>. Its ingredients are added at the amount you pick,
+      and matching ingredients are combined.</p>`;
+    return;
+  }
+  box.innerHTML = `<ul class="list-recipes" style="list-style:none;padding:0;margin:0">${recipes.map(r => `<li data-lr="${r.id}">
+      <span class="t"><a href="recipe.html?id=${r.recipeId}">${escapeHtml(r.title)}</a>${r.deleted ? ' <span class="muted">(deleted)</span>' : ''}<br>
+        <span class="muted">${formatQuantity(r.scaleValue)} ${r.scaleMode === 'batches' ? 'batch' + (r.scaleValue === 1 ? '' : 'es') : 'serving' + (r.scaleValue === 1 ? '' : 's')}${r.excludedIngredientIds.length ? ` · ${r.excludedIngredientIds.length} left off` : ''}</span></span>
+      ${canEdit() ? `<span class="qty-stepper"><input type="text" inputmode="decimal" class="qty-input" value="${quantityToInput(r.scaleValue)}" aria-label="How many ${r.scaleMode} of ${escapeHtml(r.title)}" data-scale></span>
+        <button type="button" class="btn small secondary" data-rescale>Update</button>
+        <button type="button" class="btn small danger" data-unlist>Remove</button>` : ''}
+    </li>`).join('')}</ul>
+    ${canEdit() ? `<div class="actions"><button type="button" class="btn secondary small" id="rebuild">Rebuild from recipes</button></div>
+      <p class="hint">Rebuild throws away changes to recipe items and builds them again from the recipes above. Items you added yourself are kept.</p>` : ''}`;
+  box.querySelectorAll('[data-lr]').forEach(li => {
+    const lr = recipes.find(x => x.id === Number(li.dataset.lr));
+    const up = li.querySelector('[data-rescale]');
+    if (up) {
+      up.addEventListener('click', async () => {
+        const v = parseFraction(li.querySelector('[data-scale]').value);
+        if (!(v > 0)) { toast('Enter how many, like 6 or 1 1/2'); return; }
+        await run(() => apiPost('updateListRecipe', { id: lr.id, scaleMode: lr.scaleMode, scaleValue: v, excludedIngredientIds: lr.excludedIngredientIds }), 'Amount updated');
+      });
+      li.querySelector('[data-unlist]').addEventListener('click', async () => {
+        if (!confirm(`Take ${lr.title} off this list? Its ingredients are subtracted; items you've changed by hand are kept and marked.`)) { return; }
+        await run(() => apiPost('removeListRecipe', { id: lr.id }), 'Recipe removed');
+      });
+    }
+  });
+  const rebuild = document.getElementById('rebuild');
+  if (rebuild) {
+    rebuild.addEventListener('click', async () => {
+      if (!confirm('Rebuild from the recipes?\n\nChanges you made to recipe items are thrown away. Items you added yourself are kept.' +
+        (members.length > 1 ? '\n\nThis list is shared — everyone sees the rebuilt list.' : ''))) { return; }
+      await run(() => apiPost('rebuildList', { listId }), 'List rebuilt');
+    });
+  }
+}
+
+// Runs an action, then reloads the whole list.
+async function run(action, message) {
+  try {
+    await action();
+    if (message) { toast(message); }
+    await load();
+  } catch (e) { alert(e.message); }
+}
+
+// ---- Items: edit mode -------------------------------------------------------
+
+function editRow(i) {
+  const deptOptions = departments.map(d => `<option${d === i.department ? ' selected' : ''}>${escapeHtml(d)}</option>`).join('');
+  const open = moreOpen.has(i.id);
+  const extras = [i.storeId !== null ? `🏬 ${escapeHtml(storeName(i.storeId))}` : '', i.assignedUserId ? `👤 ${escapeHtml(memberName(i.assignedUserId))}` : '',
+    i.notes ? escapeHtml(i.notes) : ''].filter(Boolean).join(' · ');
+  return `<div class="shop-item-row" data-id="${i.id}">
+    <span class="qty-stepper" style="grid-area:qty"><button type="button" class="qty-step-btn" data-act="dec" aria-label="Less ${escapeHtml(i.label)}">−</button>
+      <input type="text" inputmode="decimal" class="qty-input" data-f="quantity" value="${escapeHtml(quantityToInput(i.quantity))}" aria-label="Amount of ${escapeHtml(i.label)}">
+      <button type="button" class="qty-step-btn" data-act="inc" aria-label="More ${escapeHtml(i.label)}">+</button></span>
+    <input type="text" class="unit-input" style="grid-area:unit" data-f="unit" placeholder="Unit" value="${escapeHtml(i.unit || '')}" aria-label="Unit for ${escapeHtml(i.label)}">
+    <input type="text" style="grid-area:name" data-f="label" value="${escapeHtml(i.label)}" aria-label="Item name">
+    <select style="grid-area:dept" data-f="department" aria-label="Department for ${escapeHtml(i.label)}">${deptOptions}</select>
+    <button type="button" class="btn small secondary" style="grid-area:more" data-act="more" aria-expanded="${open}">${open ? 'Less' : 'More'}</button>
+    <button type="button" class="icon-btn" style="grid-area:remove" data-act="remove" aria-label="Remove ${escapeHtml(i.label)}">×</button>
+    <div class="from" style="grid-area:from">${i.sources.length ? `From ${i.sources.map(escapeHtml).join(', ')}` : (i.manual ? 'Added by hand' : '')}
+      ${extras ? ` · ${extras}` : ''}${i.needsReview ? ' <span class="badge">Check amount — a recipe was removed</span>' : ''}
+      ${!hasShoppableQty(i) ? ' <span class="badge">Not needed — hidden while shopping</span>' : ''}</div>
+    ${open ? `<div class="shop-item-more" style="grid-area:extra">
+      <label style="margin:0">Store<select data-f="storeId"><option value="">Unassigned</option>${stores.map(s => `<option value="${s.id}"${s.id === i.storeId ? ' selected' : ''}>${escapeHtml(s.name)}</option>`).join('')}
+        <option value="__new">+ Another store…</option></select></label>
+      <label style="margin:0">Assigned to<select data-f="assignedUserId"><option value="">Anyone</option>${members.map(m => `<option value="${m.id}"${m.id === i.assignedUserId ? ' selected' : ''}>${escapeHtml(m.name)}</option>`).join('')}</select></label>
+      <label style="margin:0" class="wide">Notes<input type="text" data-f="notes" maxlength="255" value="${escapeHtml(i.notes || '')}" placeholder="Brand, size, coupon…"></label>
+    </div>` : ''}
+  </div>`;
+}
+
+// ---- Items: shopping mode ---------------------------------------------------
+
+function shopRow(i) {
+  const meta = [groupBy === 'dept' && i.storeId !== null ? storeName(i.storeId) : '', groupBy === 'store' ? i.department : '',
+    i.assignedUserId ? `👤 ${memberName(i.assignedUserId)}` : '', i.notes || ''].filter(Boolean).join(' · ');
+  return `<button type="button" class="shop-mode-item${i.checked ? ' checked' : ''}" data-check="${i.id}" aria-pressed="${i.checked}"${canEdit() ? '' : ' disabled'}>
+    <span class="box" aria-hidden="true"></span>
+    <span class="txt">${itemAmount(i) ? `<strong>${escapeHtml(itemAmount(i))}</strong> ` : ''}${escapeHtml(i.label)}${meta ? `<span class="meta">${escapeHtml(meta)}</span>` : ''}</span>
+  </button>`;
+}
+
+function renderItems() {
+  pendingRender = false;
+  const box = document.getElementById('items');
+  if (!box) { return; }
+  const all = [...items.values()];
+  if (mode === 'shop') {
+    const shoppable = all.filter(hasShoppableQty);
+    const open = shoppable.filter(i => !i.checked);
+    const done = shoppable.filter(i => i.checked).sort(byDeptThenPosition);
+    box.innerHTML = shoppable.length
+      ? grouped(open).map(g => `<div class="shop-dept-header">${escapeHtml(g.title)}</div>${g.items.map(shopRow).join('')}`).join('')
+        + (open.length ? '' : '<p style="padding:12px 4px;margin:0">🎉 Everything is checked off.</p>')
+        + (done.length ? `<div class="shop-dept-header done">Checked Off (${done.length})</div>${done.map(shopRow).join('')}` : '')
+      : '<p class="muted">Nothing to shop for yet.</p>';
+    return;
+  }
+  box.innerHTML = `
+    <form class="toolbar" id="add-form" style="margin-bottom:4px" novalidate>
+      <input type="text" id="add-label" placeholder="Add an item…" aria-label="New item name" style="flex:2;min-width:160px">
+      <input type="text" id="add-qty" inputmode="decimal" placeholder="Amt" aria-label="Amount" style="width:70px;flex:none">
+      <input type="text" id="add-unit" placeholder="Unit" aria-label="Unit" style="width:90px;flex:none">
+      <button type="submit" class="btn">Add</button>
+    </form>
+    ${all.length ? grouped(all).map(g => `<div class="shop-dept-header">${escapeHtml(g.title)}</div>${g.items.map(editRow).join('')}`).join('')
+      : '<p class="muted">Your shopping list is empty.</p>'}`;
+  document.getElementById('add-form').addEventListener('submit', async ev => {
+    ev.preventDefault();
+    const label = document.getElementById('add-label');
+    if (!label.value.trim()) { label.focus(); return; }
+    try {
+      const res = await apiPost('addItem', { listId, label: label.value, quantity: document.getElementById('add-qty').value,
+        unit: document.getElementById('add-unit').value });
+      items.set(res.item.id, res.item);
+      renderItems();
+      document.getElementById('add-label').focus();
+    } catch (e) { toast(e.message); }
+  });
+}
+
+// ---- Item events (delegated, so re-rendering never doubles up listeners) ----
+
+function itemOf(el) {
+  const row = el.closest('[data-id]');
+  return row ? items.get(Number(row.dataset.id)) : null;
+}
+
+async function saveField(item, field, value) {
+  try {
+    const res = await apiPost('updateItem', { id: item.id, changes: { [field]: value }, base: { [field]: item[field] } });
+    items.set(item.id, res.item);
+    if ((field === 'department' && groupBy === 'dept') || (field === 'storeId' && groupBy === 'store')) {
+      renderItems(); // the row moves to another group right away, as in the Senior Family Cookbook
+    } else {
+      // Never rebuild rows mid-edit (the Senior Family Cookbook lesson: a rebuild can swallow a
+      // tap on the next field). A re-guessed department is shown in place; the rest redraws when
+      // focus leaves the list.
+      const sel = document.querySelector(`[data-id="${item.id}"] [data-f="department"]`);
+      if (sel && res.item.department !== item.department) { sel.value = res.item.department; }
+      holdOrRefresh([[item, res.item]]);
+    }
+  } catch (e) {
+    if (e.status === 409 && e.data && e.data.item) {
+      items.set(item.id, e.data.item);
+      toast(`${e.data.changedBy ? e.data.changedBy.name : 'Someone'} changed this first — showing their version`);
+      renderItems();
+    } else {
+      toast(e.message);
+      renderItems();
+    }
+  }
+}
+
+function wirePage() {
+  const box = document.getElementById('items');
+  box.addEventListener('change', async ev => {
+    const el = ev.target;
+    const f = el.dataset.f;
+    const item = itemOf(el);
+    if (!f || !item) { return; }
+    let value = el.value;
+    if (f === 'storeId' && value === '__new') {
+      const name = prompt('Store name');
+      if (!name || !name.trim()) { el.value = item.storeId ?? ''; return; }
+      try {
+        const res = await apiPost('addStore', { name: name.trim() });
+        if (!stores.some(s => s.id === res.store.id)) { stores.push({ id: res.store.id, name: res.store.name, custom: true }); }
+        value = res.store.id;
+      } catch (e) { toast(e.message); el.value = item.storeId ?? ''; return; }
+    }
+    if (f === 'storeId' || f === 'assignedUserId') { value = value === '' ? null : Number(value); }
+    saveField(item, f, value);
+  });
+  box.addEventListener('click', async ev => {
+    const btn = ev.target.closest('[data-act], [data-check]');
+    if (!btn) { return; }
+    if (btn.dataset.check) {
+      const item = items.get(Number(btn.dataset.check));
+      const want = !item.checked;
+      items.set(item.id, { ...item, checked: want }); // show it right away
+      renderItems();
+      try {
+        const res = await apiPost('setItemChecked', { id: item.id, checked: want });
+        items.set(item.id, res.item);
+      } catch (e) {
+        items.set(item.id, item);
+        toast(e.message);
+        renderItems();
+      }
+      return;
+    }
+    const item = itemOf(btn);
+    if (!item) { return; }
+    const act = btn.dataset.act;
+    if (act === 'inc' || act === 'dec') {
+      const next = Math.max(0, Math.round(((Number(item.quantity) || 0) + (act === 'inc' ? 1 : -1)) * 100) / 100);
+      btn.closest('[data-id]').querySelector('[data-f="quantity"]').value = quantityToInput(next);
+      saveField(item, 'quantity', next);
+    } else if (act === 'more') {
+      if (moreOpen.has(item.id)) { moreOpen.delete(item.id); } else { moreOpen.add(item.id); }
+      renderItems();
+    } else if (act === 'remove') {
+      try {
+        await apiPost('deleteItem', { id: item.id });
+        items.delete(item.id);
+        renderItems();
+      } catch (e) { toast(e.message); }
+    }
+  });
+  // When focus leaves a row, refresh that row with anything held back while it was being edited;
+  // when it leaves the list altogether, do any full redraw that was waiting.
+  box.addEventListener('focusout', ev => {
+    const row = ev.target.closest ? ev.target.closest('[data-id]') : null;
+    setTimeout(() => {
+      if (row && !row.contains(document.activeElement)) {
+        const id = Number(row.dataset.id);
+        if (pending.has(id)) {
+          const next = pending.get(id);
+          pending.delete(id);
+          const before = items.get(id);
+          if (next === null) { items.delete(id); } else { items.set(id, next); }
+          holdOrRefresh([[before, next]]);
+        }
+      }
+      if (pendingRender && !(box.contains(document.activeElement) && document.activeElement !== document.body)) { renderItems(); }
+    }, 0);
+  });
+
+  const modeBtn = document.getElementById('mode-btn');
+  if (modeBtn) {
+    modeBtn.addEventListener('click', () => {
+      mode = mode === 'shop' ? 'edit' : 'shop';
+      renderPage();
+      schedulePoll();
+      window.scrollTo(0, 0);
+    });
+  }
+  main.querySelectorAll('[data-group]').forEach(b => b.addEventListener('click', () => {
+    groupBy = b.dataset.group;
+    try { localStorage.setItem(GROUP_KEY, groupBy); } catch (e) { /* private mode */ }
+    main.querySelectorAll('[data-group]').forEach(x => x.classList.toggle('active', x.dataset.group === groupBy));
+    renderItems();
+  }));
+  document.getElementById('print').addEventListener('click', printList);
+  const on = (id, fn) => { const el = document.getElementById(id); if (el) { el.addEventListener('click', fn); } };
+  on('rename', async () => {
+    const t = prompt('Rename this list', L.title);
+    if (t && t.trim()) { await run(() => apiPost('updateList', { id: listId, title: t.trim() }), 'Renamed'); }
+  });
+  on('complete', () => run(() => apiPost('updateList', { id: listId, status: 'completed' }), 'Marked as done'));
+  on('reopen', () => run(() => apiPost('updateList', { id: listId, status: 'active' }), 'Reopened'));
+  on('copy', async () => {
+    const t = prompt('Name for the copy (everything starts unchecked)', `${L.title} (copy)`);
+    if (!t || !t.trim()) { return; }
+    try {
+      const res = await apiPost('copyList', { id: listId, title: t.trim() });
+      window.location.href = `list.html?id=${res.id}`;
+    } catch (e) { alert(e.message); }
+  });
+  on('delete', async () => {
+    if (!confirm(`Delete "${L.title}"? Everyone it's shared with loses it too.`)) { return; }
+    try {
+      await apiPost('deleteList', { id: listId });
+      window.location.href = 'lists.html';
+    } catch (e) { alert(e.message); }
+  });
+}
+
+// ---- Print (Senior Family style: checkbox list by group, recipes at the top) ----
+
+function printList() {
+  const shoppable = [...items.values()].filter(hasShoppableQty);
+  if (!shoppable.length) { toast('Nothing to print yet'); return; }
+  const rows = grouped(shoppable).map(g => `<tr class="grp"><td colspan="3">${escapeHtml(g.title)}</td></tr>` + g.items.map(i =>
+    `<tr><td class="chk">${i.checked ? '☑' : '☐'}</td><td class="q">${escapeHtml(itemAmount(i))}</td><td>${escapeHtml(i.label)}${i.notes ? ` <em>(${escapeHtml(i.notes)})</em>` : ''}</td></tr>`).join('')).join('');
+  const w = window.open('', '_blank');
+  if (!w) { toast('Allow pop-ups to print'); return; }
+  w.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${escapeHtml(L.title)}</title><style>
+    body{font-family:Georgia,serif;margin:24px;color:#000} h1{margin:0 0 4px} .meta{color:#555;margin-bottom:14px;font-family:sans-serif;font-size:13px}
+    table{border-collapse:collapse;width:100%;font-family:sans-serif;font-size:14px} td{padding:5px 6px;border-bottom:1px solid #ddd;vertical-align:top}
+    .grp td{background:#f0f4f0;color:#3D5A3E;font-weight:bold;border-bottom:2px solid #3D5A3E} .chk{width:24px;font-size:16px} .q{width:110px;white-space:nowrap}
+  </style></head><body><h1>${escapeHtml(L.title)}</h1>
+    <div class="meta">${recipes.length ? recipes.map(r => `${escapeHtml(r.title)} (${formatQuantity(r.scaleValue)} ${r.scaleMode})`).join('<br>') : 'The Senior Family Table'}</div>
+    <table>${rows}</table><script>window.onload=()=>window.print()<\/script></body></html>`);
+  w.document.close();
+}
+
+// ---- Live updates (§6.7): poll for anything newer than `seq` -------------------
+
+function schedulePoll() {
+  clearTimeout(pollTimer);
+  pollTimer = setTimeout(poll, mode === 'shop' ? POLL_SHOP_MS : POLL_EDIT_MS);
+}
+
+async function poll() {
+  if (document.hidden) { schedulePoll(); return; }
+  try {
+    const ch = await apiGet('listChanges', { id: listId, since: seq });
+    if (!syncOk) { syncOk = true; renderSync(); }
+    if (!ch.unchanged) { applyChanges(ch); }
+  } catch (e) {
+    if (e.status === 404) { main.innerHTML = '<div class="card"><p>This list was deleted or you were removed from it.</p><p><a href="lists.html">Back to your lists</a></p></div>'; return; }
+    if (syncOk) { syncOk = false; renderSync(); }
+  }
+  schedulePoll();
+}
+
+// The row (edit mode) that currently holds the keyboard focus, if any.
+function busyRowId() {
+  const a = document.activeElement;
+  const row = a && a.closest ? a.closest('#items [data-id]') : null;
+  return row ? Number(row.dataset.id) : null;
+}
+
+function isTyping() {
+  const box = document.getElementById('items');
+  const a = document.activeElement;
+  return !!(box && a && box.contains(a) && /INPUT|SELECT|TEXTAREA/.test(a.tagName));
+}
+
+const groupOf = i => (i ? (groupBy === 'store' ? i.storeId ?? null : i.department) : undefined);
+
+// Shows changed items: rows that stay in their group are swapped in place (never the row being
+// edited, so nothing you're typing is lost); anything that moves, appears or disappears needs a
+// full redraw, which waits while you're typing.
+function holdOrRefresh(changes) {
+  if (mode !== 'edit') { renderItems(); return; }
+  const busy = busyRowId();
+  let full = false;
+  for (const [before, after] of changes) {
+    const id = (after || before).id;
+    if (id === busy) { pending.set(id, after); continue; }
+    const el = document.querySelector(`#items [data-id="${id}"]`);
+    if (!after) { if (el) { el.remove(); } continue; }
+    if (!before || !el || groupOf(before) !== groupOf(after)) { full = true; continue; }
+    el.outerHTML = editRow(after);
+  }
+  if (full) {
+    if (isTyping()) { pendingRender = true; } else { renderItems(); }
+  }
+}
+
+function applyChanges(ch) {
+  seq = ch.changeSeq;
+  const busy = mode === 'edit' ? busyRowId() : null;
+  const changes = [];
+  for (const it of ch.items) {
+    if (it.id === busy) { pending.set(it.id, it); continue; }
+    changes.push([items.get(it.id) || null, it]);
+    items.set(it.id, it);
+  }
+  for (const id of ch.deleted) {
+    if (id === busy) { pending.set(id, null); continue; }
+    if (items.has(id)) { changes.push([items.get(id), null]); items.delete(id); }
+  }
+  const headerChanged = ch.title !== L.title || ch.status !== L.status || JSON.stringify(ch.recipes) !== JSON.stringify(recipes)
+    || ch.members.length !== members.length;
+  L.title = ch.title;
+  L.status = ch.status;
+  recipes = ch.recipes;
+  members = ch.members;
+  stores = ch.stores;
+  if (headerChanged && !isTyping()) {
+    renderPage();
+  } else {
+    holdOrRefresh(changes);
+  }
+}
+
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { clearTimeout(pollTimer); poll(); } });
+
+async function load() {
+  const res = await apiGet('getList', { id: listId });
+  L = res.list;
+  seq = res.list.changeSeq;
+  items = new Map(res.items.map(i => [i.id, i]));
+  recipes = res.recipes;
+  members = res.members;
+  stores = res.stores;
+  departments = res.departments;
+  rememberList(listId);
+  renderPage();
+  schedulePoll();
+}
+
+load().catch(e => handleError(main, e));
+</script>
+</body>
+</html>

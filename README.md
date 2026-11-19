@@ -7,9 +7,9 @@ synced between devices.
 
 No meal planner, by design.
 
-> **Status:** Recipe library built and tested locally (cookbooks, recipes, editor, sharing,
-> history, search). Not yet deployed — see [SETUP.md](SETUP.md). Next: import screen, catalog,
-> tags, photos and notes; then scaling and shopping lists.
+> **Status:** Live. Recipe library, scaling, and shopping lists (Senior Family Cookbook style,
+> shared and synced) are built and tested. Next: paste-text import, ingredient catalog, tag
+> editing, photos and notes.
 
 | File | What it is |
 | ---- | ---------- |

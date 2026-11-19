@@ -11,14 +11,28 @@
 <main><p class="muted">Loading…</p></main>
 <script src="js/api.js"></script>
 <script src="js/app.js"></script>
+<script src="js/addtolist.js"></script>
 <script>
 const main = renderShell('');
 const recipeId = Number(param('id'));
 const fromCookbook = Number(param('cookbook')) || null;
 let r = null;
 let myBooks = [];
+// Scaling (§6 / REQUIREMENTS §6): servings or batches; the master recipe is never changed.
+let scaleMode = 'servings';
+let scaleValue = null;
 
-function ingredientList(list) {
+const baseFor = mode => (mode === 'batches' ? r.yieldQuantity : r.servings);
+function factor() {
+  const base = baseFor(scaleMode);
+  return base && scaleValue ? scaleValue / base : 1;
+}
+function scaleLabel() {
+  if (scaleMode === 'batches') { return `${formatQuantity(scaleValue)} ${unitLabel(r.yieldUnit || 'batch', scaleValue) || 'batches'}`; }
+  return `${formatQuantity(scaleValue)} serving${Number(scaleValue) === 1 ? '' : 's'}`;
+}
+
+function ingredientList(list, f = 1) {
   let html = '';
   let section = null;
   for (const i of list) {
@@ -26,7 +40,7 @@ function ingredientList(list) {
       section = i.section || null;
       if (section) { html += `<li class="section">${escapeHtml(section)}</li>`; }
     }
-    html += `<li>${escapeHtml(i.text)}${i.optional && !/optional/i.test(i.text) ? ' <span class="opt">(optional)</span>' : ''}</li>`;
+    html += `<li>${escapeHtml(scaledIngredientText(i, f))}${i.optional && !/optional/i.test(i.text) ? ' <span class="opt">(optional)</span>' : ''}</li>`;
   }
   return `<ul class="ingredients">${html}</ul>`;
 }
@@ -40,6 +54,34 @@ function stepsHtml() {
     html += `<h3 style="margin-top:16px">${escapeHtml(m.name)}</h3><ol class="steps">${ms.map(s => `<li>${escapeHtml(s.text)}</li>`).join('')}</ol>`;
   }
   return html || '<p class="muted">No steps yet.</p>';
+}
+
+function scaleControls() {
+  if (!r.servings && !r.yieldQuantity) {
+    return r.canEdit ? '<p class="hint no-print">Add servings or a batch size in the editor to scale this recipe.</p>' : '';
+  }
+  const unitWord = scaleMode === 'batches' ? (unitLabel(r.yieldUnit || 'batch', 2) || 'batches') : 'servings';
+  return `<div class="scale no-print" role="group" aria-label="Scale this recipe">
+    ${r.servings && r.yieldQuantity ? `<span class="seg"><button type="button" data-mode="servings" class="${scaleMode === 'servings' ? 'active' : ''}">Servings</button><button type="button" data-mode="batches" class="${scaleMode === 'batches' ? 'active' : ''}">Batches</button></span>` : ''}
+    <span class="qty-stepper"><button type="button" class="qty-step-btn" data-step="-1" aria-label="Fewer">−</button>
+      <input type="text" inputmode="decimal" id="scale-input" class="qty-input" value="${quantityToInput(scaleValue)}" aria-label="How many ${unitWord}">
+      <button type="button" class="qty-step-btn" data-step="1" aria-label="More">+</button></span>
+    <span>${escapeHtml(unitWord)}</span>
+    <button type="button" class="link-btn" id="scale-reset">Reset</button>
+    <button type="button" class="link-btn" id="scale-save">Remember this amount</button>
+  </div>`;
+}
+
+function scaleNote() {
+  const f = factor();
+  if (Math.abs(f - 1) < 1e-9) { return ''; }
+  return `<p class="banner" style="margin:10px 0">Scaled ×${formatQuantity(Math.round(f * 100) / 100)} to ${escapeHtml(scaleLabel())}. Ingredient amounts are scaled;
+    <strong>cooking times, pan sizes and equipment may need adjusting by hand.</strong></p>`;
+}
+
+function renderIngredients() {
+  document.getElementById('ing-list').innerHTML = (r.ingredients.length ? ingredientList(r.ingredients, factor()) : '<p class="muted">No ingredients yet.</p>');
+  document.getElementById('scale-note').innerHTML = scaleNote();
 }
 
 function render() {
@@ -66,16 +108,18 @@ function render() {
       ${r.tags.length ? `<div>${r.tags.map(t => `<span class="pill">${escapeHtml(t.name)}</span>`).join('')}</div>` : ''}
       ${r.description ? `<div style="margin-top:12px">${formatText(r.description)}</div>` : ''}
       <div class="actions no-print">
-        ${r.canEdit ? `<a class="btn" href="recipe-edit.html?id=${r.id}${fromCookbook ? `&cookbook=${fromCookbook}` : ''}">Edit</a>` : ''}
+        ${r.ingredients.length ? '<button type="button" class="btn" id="to-list">🛒 Add to shopping list</button>' : ''}
+        ${r.canEdit ? `<a class="btn secondary" href="recipe-edit.html?id=${r.id}${fromCookbook ? `&cookbook=${fromCookbook}` : ''}">Edit</a>` : ''}
         <a class="btn secondary" href="share.html?type=recipe&id=${r.id}">${r.canManage ? 'Share' : 'People'}</a>
         <a class="btn secondary" href="history.html?id=${r.id}">History</a>
         <button type="button" class="btn secondary" onclick="window.print()">Print</button>
         ${r.canManage ? '<button type="button" class="btn danger" id="del">Delete</button>' : ''}
       </div>
     </div>
+    <section class="card hidden no-print" id="atl-box" aria-label="Add to shopping list"></section>
     <div class="recipe-body">
       <section class="card" aria-labelledby="ing-h"><h2 id="ing-h">Ingredients</h2>
-        ${r.ingredients.length ? ingredientList(r.ingredients) : '<p class="muted">No ingredients yet.</p>'}</section>
+        ${scaleControls()}<div id="scale-note"></div><div id="ing-list"></div></section>
       <section class="card" aria-labelledby="steps-h"><h2 id="steps-h">Steps</h2>${stepsHtml()}</section>
     </div>
     ${r.generalNotes ? `<section class="card"><h2>Notes</h2>${formatText(r.generalNotes)}</section>` : ''}
@@ -91,6 +135,17 @@ function render() {
       <p class="muted" style="margin:8px 0 0;font-size:0.9rem">Version ${r.version}${r.updatedBy ? ` · last changed by ${escapeHtml(r.updatedBy.name)} ${formatDateTime(r.updatedAt)}` : ''}</p>
     </section>`;
 
+  renderIngredients();
+  wireScale();
+  const toList = document.getElementById('to-list');
+  if (toList) {
+    toList.addEventListener('click', () => {
+      const box = document.getElementById('atl-box');
+      showAddToList(box, [{ id: r.id, title: r.title, ingredients: r.ingredients, factor: factor(),
+        scaleMode, scaleValue, scaleLabel: scaleValue ? scaleLabel() : '' }]);
+      box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  }
   document.getElementById('fav').addEventListener('click', async () => {
     try {
       await apiPost('setFavorite', { recipeId: r.id, favorite: !r.me.favorite });
@@ -121,10 +176,45 @@ function render() {
   }
 }
 
+function wireScale() {
+  const input = document.getElementById('scale-input');
+  if (!input) { return; }
+  const apply = v => {
+    if (!(v > 0)) { return; }
+    scaleValue = Math.round(v * 1000) / 1000;
+    input.value = quantityToInput(scaleValue);
+    renderIngredients();
+  };
+  input.addEventListener('change', () => {
+    const v = parseFraction(input.value);
+    if (v > 0) { apply(v); } else { input.value = quantityToInput(scaleValue); }
+  });
+  main.querySelectorAll('[data-step]').forEach(b => b.addEventListener('click', () => apply(Math.max(1, (scaleValue || 0) + Number(b.dataset.step)))));
+  main.querySelectorAll('[data-mode]').forEach(b => b.addEventListener('click', () => {
+    scaleMode = b.dataset.mode;
+    scaleValue = baseFor(scaleMode);
+    render();
+  }));
+  document.getElementById('scale-reset').addEventListener('click', () => {
+    scaleValue = baseFor(scaleMode);
+    input.value = quantityToInput(scaleValue);
+    renderIngredients();
+  });
+  document.getElementById('scale-save').addEventListener('click', async () => {
+    try {
+      await apiPost('setSavedScale', { recipeId: r.id, mode: scaleMode, value: scaleValue });
+      toast(`Remembered: ${scaleLabel()}`);
+    } catch (e) { toast(e.message); }
+  });
+}
+
 async function load() {
   const [rec, books] = await Promise.all([apiGet('getRecipe', { id: recipeId }), apiGet('listCookbooks')]);
   r = rec.recipe;
   myBooks = books.cookbooks.filter(b => !b.archived);
+  // Start at this person's remembered amount, else as written.
+  scaleMode = r.me.savedScaleMode === 'batches' && r.yieldQuantity ? 'batches' : (r.servings ? 'servings' : (r.yieldQuantity ? 'batches' : 'servings'));
+  scaleValue = r.me.savedScale && r.me.savedScaleMode === scaleMode ? r.me.savedScale : baseFor(scaleMode);
   render();
 }
 

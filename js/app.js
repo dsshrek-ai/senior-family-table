@@ -2,6 +2,7 @@
 
 const NAV = [
   ['index.html', 'Cookbooks', '📚'],
+  ['lists.html', 'Lists', '🛒'],
   ['search.html', 'Search', '🔍'],
 ];
 
@@ -64,6 +65,18 @@ function quantityToInput(q) {
   return String(Math.round(n * 1000) / 1000);
 }
 
+// "2", "1.5", "1/2", "1 1/2", "1½" → number; anything else → NaN.
+const UNICODE_FRACTIONS = { '½': 1 / 2, '⅓': 1 / 3, '⅔': 2 / 3, '¼': 1 / 4, '¾': 3 / 4, '⅛': 1 / 8, '⅜': 3 / 8, '⅝': 5 / 8, '⅞': 7 / 8 };
+function parseFraction(text) {
+  const t = String(text ?? '').trim();
+  if (/^\d+(\.\d+)?$/.test(t)) { return Number(t); }
+  let m = t.match(/^(?:(\d+)\s+)?(\d+)\/(\d+)$/);
+  if (m && Number(m[3])) { return Number(m[1] || 0) + Number(m[2]) / Number(m[3]); }
+  m = t.match(/^(\d*)\s*([½⅓⅔¼¾⅛⅜⅝⅞])$/);
+  if (m) { return Number(m[1] || 0) + UNICODE_FRACTIONS[m[2]]; }
+  return NaN;
+}
+
 // 155 → "2 hr 35 min"
 function formatMinutes(m) {
   if (m === null || m === undefined) { return ''; }
@@ -82,6 +95,49 @@ function formatText(text) {
   if (!text) { return ''; }
   return String(text).split(/\n{2,}/).map(p => `<p>${escapeHtml(p).replace(/\n/g, '<br>')}</p>`).join('');
 }
+
+// ---- Units and scaling (mirrors api/lib/units.php) ----
+
+const PLURAL_UNITS = {
+  cup: 'cups', pint: 'pints', quart: 'quarts', gallon: 'gallons', liter: 'liters', can: 'cans', package: 'packages',
+  bottle: 'bottles', box: 'boxes', bag: 'bags', jar: 'jars', envelope: 'envelopes', tub: 'tubs', container: 'containers',
+  clove: 'cloves', slice: 'slices', stalk: 'stalks', rib: 'ribs', head: 'heads', bunch: 'bunches', sprig: 'sprigs',
+  sheet: 'sheets', rack: 'racks', stick: 'sticks', strip: 'strips', scoop: 'scoops', handful: 'handfuls', pinch: 'pinches',
+  dash: 'dashes', drop: 'drops', piece: 'pieces', batch: 'batches', capful: 'capfuls', lemon: 'lemons', lime: 'limes',
+};
+function unitLabel(unit, qty) {
+  if (!unit) { return ''; }
+  return Number(qty) > 1 && PLURAL_UNITS[unit] ? PLURAL_UNITS[unit] : unit;
+}
+
+// An ingredient line at a scale. At 1× the line is shown exactly as written.
+function scaledIngredientText(i, factor) {
+  if (Math.abs(factor - 1) < 1e-9 || i.quantity === null) { return i.text; }
+  const q = i.quantity * factor;
+  const max = i.quantityMax !== null ? i.quantityMax * factor : null;
+  const amount = formatQuantity(q) + (max !== null ? `–${formatQuantity(max)}` : '');
+  let unit = unitLabel(i.unit, max ?? q);
+  if (i.dimension === 'package' && i.package) { unit = `${unit} (${i.package})`.trim(); }
+  let text = [amount, unit, i.name].filter(Boolean).join(' ');
+  if (i.preparation) { text += ` (${i.preparation})`; }
+  return text;
+}
+
+// Senior Family rule: no amount, or 0, means "don't need it" — kept in edit mode,
+// hidden while shopping and on the printout.
+function hasShoppableQty(item) {
+  return item.quantity !== null && item.quantity !== undefined && Number(item.quantity) !== 0;
+}
+
+function itemAmount(item) {
+  if (item.quantity === null || item.quantity === undefined) { return ''; }
+  return [formatQuantity(item.quantity), unitLabel(item.unit, item.quantity)].filter(Boolean).join(' ');
+}
+
+// Remembers the shopping list last used, so "Add to shopping list" pre-selects it.
+const LAST_LIST_KEY = 'sftLastList';
+function lastListId() { try { return Number(localStorage.getItem(LAST_LIST_KEY)) || null; } catch (e) { return null; } }
+function rememberList(id) { try { localStorage.setItem(LAST_LIST_KEY, String(id)); } catch (e) { /* private mode */ } }
 
 const ROLE_LABELS = {
   owner: 'Owner', editor: 'Editor', viewer: 'Viewer', co_owner: 'Co-owner',

@@ -432,6 +432,258 @@ await test('delete: hidden everywhere, restorable by a co-owner for 30 days', as
   assert.equal((await call('owner', 'getRecipe', { params: { id: newRecipe } })).status, 200);
 });
 
+// ---- Scaling (personal saved scale) ---------------------------------------------
+
+await test('saved scale is personal and never changes the master', async () => {
+  assert.equal((await call('owner', 'setSavedScale', { body: { recipeId: soup, mode: 'servings', value: 12 } })).status, 200);
+  const mine = (await call('owner', 'getRecipe', { params: { id: soup } })).data.recipe;
+  assert.deepEqual([mine.me.savedScaleMode, mine.me.savedScale], ['servings', 12]);
+  assert.equal(mine.servings, 6);
+  const hers = (await call('elaine', 'getRecipe', { params: { id: soup } })).data.recipe;
+  assert.equal(hers.me.savedScale, null);
+});
+
+// ---- Shopping lists ------------------------------------------------------------
+
+// Two recipes with known amounts, so every combining rule can be checked exactly.
+const soupA = (await call('owner', 'createRecipe', { body: { cookbookId: familyBook, recipe: {
+  title: 'List Soup A', servings: '6', ingredients: [
+    { quantity: '1', unit: 'cup', name: 'milk' },
+    { quantity: '2', unit: 'tbsp', name: 'butter' },
+    { quantity: '1', unit: '', name: 'onion', preparation: 'chopped' },
+    { quantity: '1', unit: 'lb', name: 'ground beef' },
+    { quantity: '', unit: 'to taste', name: 'salt' },
+    { quantity: '1', unit: 'can (15 oz)', name: 'black beans' },
+    { quantity: '1', unit: 'tsp', name: 'red pepper flakes', optional: true },
+  ], steps: [{ text: 'Cook.' }] } } })).data.id;
+const soupB = (await call('owner', 'createRecipe', { body: { cookbookId: familyBook, recipe: {
+  title: 'List Soup B', servings: '4', ingredients: [
+    { quantity: '2', unit: 'cups', name: 'milk' },
+    { quantity: '3', unit: '', name: 'onions' },
+    { quantity: '1', unit: 'bunch', name: 'green onions' },
+    { quantity: '8', unit: 'oz', name: 'ground beef' },
+    { quantity: '1', unit: 'tsp', name: 'salt' },
+    { quantity: '1', unit: 'can (15 oz)', name: 'black beans' },
+    { quantity: '1', unit: 'can (28 oz)', name: 'crushed tomatoes' },
+  ], steps: [{ text: 'Cook.' }] } } })).data.id;
+const lasagna = (await call('owner', 'createRecipe', { body: { cookbookId: familyBook, recipe: {
+  title: 'List Lasagna', servings: '12', yieldQuantity: '1', yieldUnit: 'pan',
+  ingredients: [{ quantity: '1', unit: 'lb', name: 'lasagna noodles' }], steps: [{ text: 'Bake.' }] } } })).data.id;
+
+let listId = 0;
+let lrA = 0;
+let lrB = 0;
+const items = async (who = 'owner') => (await call(who, 'getList', { params: { id: listId } })).data.items;
+const find = (list, label) => list.find(i => i.label.toLowerCase() === label);
+
+await test('lists: create a purpose list', async () => {
+  const r = await call('owner', 'createList', { body: { title: 'Christmas Social' } });
+  assert.equal(r.status, 200);
+  listId = r.data.id;
+  const got = (await call('owner', 'getList', { params: { id: listId } })).data;
+  assert.equal(got.list.role, 'owner');
+  assert.deepEqual(got.items, []);
+  assert.ok(got.departments.includes('Produce'));
+  assert.ok(got.stores.some(s => s.name === 'Costco'));
+});
+await test('serving scale: 6-serving soup doubled to 12 doubles shopping amounts (acceptance 6)', async () => {
+  const r = await call('owner', 'addRecipeToList', { body: { listId, recipeId: soupA, scaleMode: 'servings', scaleValue: 12 } });
+  assert.equal(r.status, 200);
+  lrA = r.data.listRecipeId;
+  const it = await items();
+  assert.deepEqual([find(it, 'milk').quantity, find(it, 'milk').unit], [2, 'cup']);
+  assert.deepEqual([find(it, 'butter').quantity, find(it, 'butter').unit], [4, 'tbsp']);
+  assert.equal(find(it, 'onion').quantity, 2);
+  assert.deepEqual([find(it, 'ground beef').quantity, find(it, 'ground beef').unit], [2, 'lb']);
+  assert.equal(find(it, 'salt').quantity, null);
+  assert.deepEqual([find(it, 'black beans').quantity, find(it, 'black beans').unit, find(it, 'black beans').notes], [2, 'can', '15 oz']);
+  assert.equal(find(it, 'red pepper flakes'), undefined, 'optional ingredients are left off by default');
+  const master = (await call('owner', 'getRecipe', { params: { id: soupA } })).data.recipe;
+  assert.equal(master.ingredients[0].quantity, 1, 'the master recipe is untouched');
+});
+await test('the same recipe twice on one list → 409 pointing at the existing entry', async () => {
+  const r = await call('owner', 'addRecipeToList', { body: { listId, recipeId: soupA } });
+  assert.equal(r.status, 409);
+  assert.equal(r.data.listRecipeId, lrA);
+});
+await test('consolidation: only same ingredient + compatible unit combine', async () => {
+  const r = await call('owner', 'addRecipeToList', { body: { listId, recipeId: soupB } });
+  lrB = r.data.listRecipeId;
+  const it = await items();
+  assert.deepEqual([find(it, 'milk').quantity, find(it, 'milk').unit], [1, 'quart'], '2 cups + 2 cups = 1 quart');
+  assert.equal(find(it, 'onion').quantity, 5, '2 onions + 3 onions');
+  assert.ok(find(it, 'green onions'), 'green onions stay separate from onions');
+  assert.deepEqual([find(it, 'ground beef').quantity, find(it, 'ground beef').unit], [2.5, 'lb'], '2 lb + 8 oz');
+  assert.deepEqual([find(it, 'salt').quantity, find(it, 'salt').unit], [1, 'tsp'], '"to taste" joins the measured salt');
+  assert.equal(find(it, 'black beans').quantity, 3, 'same-size cans add up');
+  assert.ok(find(it, 'crushed tomatoes'));
+  assert.deepEqual(find(it, 'milk').sources.sort(), ['List Soup A', 'List Soup B']);
+  assert.equal(it.filter(i => i.label.toLowerCase().includes('onion')).length, 2);
+});
+await test('departments are guessed like the Senior Family Cookbook', async () => {
+  const it = await items();
+  assert.equal(find(it, 'milk').department, 'Dairy & Eggs');
+  assert.equal(find(it, 'ground beef').department, 'Meat & Seafood');
+  assert.equal(find(it, 'onion').department, 'Produce');
+});
+await test('item edit: compare-and-set refuses a stale value, accepts a current one', async () => {
+  const milk = find(await items(), 'milk');
+  const stale = await call('owner', 'updateItem', { body: { id: milk.id, changes: { quantity: 5 }, base: { quantity: 3 } } });
+  assert.equal(stale.status, 409);
+  assert.equal(stale.data.item.quantity, 1);
+  const ok = await call('owner', 'updateItem', { body: { id: milk.id, changes: { quantity: '1 1/2', unit: 'gallons' }, base: { quantity: 1, unit: 'quart' } } });
+  assert.equal(ok.status, 200);
+  assert.deepEqual([ok.data.item.quantity, ok.data.item.unit, ok.data.item.edited], [1.5, 'gallon', true]);
+});
+await test('item edit: two people editing different fields both win', async () => {
+  const beef = find(await items(), 'ground beef');
+  assert.equal((await call('owner', 'updateItem', { body: { id: beef.id, changes: { notes: '80/20' }, base: { notes: null } } })).status, 200);
+  const r = await call('owner', 'updateItem', { body: { id: beef.id, changes: { quantity: 3 }, base: { quantity: 2.5 } } });
+  assert.equal(r.status, 200);
+  assert.deepEqual([r.data.item.notes, r.data.item.quantity], ['80/20', 3]);
+});
+await test('a hand-picked department sticks when the item is renamed', async () => {
+  const onion = find(await items(), 'onion');
+  await call('owner', 'updateItem', { body: { id: onion.id, changes: { department: 'Frozen' }, base: { department: 'Produce' } } });
+  const r = await call('owner', 'updateItem', { body: { id: onion.id, changes: { label: 'yellow onion' }, base: { label: 'onion' } } });
+  assert.deepEqual([r.data.item.department, r.data.item.departmentManual], ['Frozen', true]);
+  const tomato = find(await items(), 'crushed tomatoes');
+  const t = await call('owner', 'updateItem', { body: { id: tomato.id, changes: { label: 'frozen peas' }, base: { label: 'crushed tomatoes' } } });
+  assert.equal(t.data.item.department, 'Frozen', 'not hand-picked → re-guessed from the new name');
+});
+await test('removing a recipe takes its share back out; hand-edited items are flagged instead', async () => {
+  assert.equal((await call('owner', 'removeListRecipe', { body: { id: lrB } })).status, 200);
+  const it = await items();
+  assert.equal(find(it, 'green onions'), undefined, 'items only Soup B needed are gone');
+  assert.equal(find(it, 'black beans').quantity, 2);
+  assert.equal(find(it, 'salt').quantity, null);
+  const milk = find(it, 'milk');
+  assert.deepEqual([milk.quantity, milk.unit, milk.needsReview], [1.5, 'gallon', true]);
+});
+await test('manual items, zero amounts, stores, and assignments', async () => {
+  const r = await call('owner', 'addItem', { body: { listId, label: 'paper plates', quantity: '2', unit: 'packages' } });
+  assert.equal(r.status, 200);
+  assert.deepEqual([r.data.item.manual, r.data.item.department, r.data.item.unit], [true, 'Other', 'package']);
+  const plates = r.data.item.id;
+  const z = await call('owner', 'updateItem', { body: { id: plates, changes: { quantity: '0' }, base: { quantity: 2 } } });
+  assert.equal(z.data.item.quantity, 0, '0 = "don\'t need it", kept on the list');
+  const costco = (await call('owner', 'getList', { params: { id: listId } })).data.stores.find(s => s.name === 'Costco');
+  assert.equal((await call('owner', 'updateItem', { body: { id: plates, changes: { storeId: costco.id }, base: { storeId: null } } })).data.item.storeId, costco.id);
+  const smiths = (await call('owner', 'addStore', { body: { name: "Smith's" } })).data.store;
+  const beans = find(await items(), 'black beans');
+  assert.equal((await call('owner', 'updateItem', { body: { id: beans.id, changes: { storeId: smiths.id }, base: { storeId: null } } })).status, 200);
+  assert.equal((await call('owner', 'updateItem', { body: { id: beans.id, changes: { storeId: 99999 }, base: { storeId: smiths.id } } })).status, 400);
+  assert.equal((await call('owner', 'updateItem', { body: { id: beans.id, changes: { assignedUserId: userId('outsider') }, base: { assignedUserId: null } } })).status, 400);
+});
+await test('rebuild from recipes keeps hand-added items and resets recipe items', async () => {
+  assert.equal((await call('owner', 'rebuildList', { body: { listId } })).status, 200);
+  const it = await items();
+  assert.ok(find(it, 'paper plates'), 'manual item kept');
+  const milk = find(it, 'milk');
+  assert.deepEqual([milk.quantity, milk.unit, milk.edited, milk.needsReview], [2, 'cup', false, false]);
+  assert.equal(find(it, 'yellow onion'), undefined, 'renamed recipe item is rebuilt from the recipe');
+  assert.ok(find(it, 'onion'));
+});
+await test('batch scale: two pans doubles the one-pan amounts (acceptance 7)', async () => {
+  const r = await call('owner', 'addRecipeToList', { body: { listId, recipeId: lasagna, scaleMode: 'batches', scaleValue: 2 } });
+  assert.equal(r.status, 200);
+  assert.deepEqual([find(await items(), 'lasagna noodles').quantity, find(await items(), 'lasagna noodles').unit], [2, 'lb']);
+  const list = (await call('owner', 'getList', { params: { id: listId } })).data;
+  const lr = list.recipes.find(x => x.recipeId === lasagna);
+  assert.deepEqual([lr.scaleMode, lr.scaleValue], ['batches', 2]);
+  assert.equal((await call('owner', 'updateListRecipe', { body: { id: lr.id, scaleMode: 'batches', scaleValue: 3 } })).status, 200);
+  assert.equal(find(await items(), 'lasagna noodles').quantity, 3);
+});
+await test('"have it": unticked ingredients stay off the list', async () => {
+  const list = (await call('owner', 'getList', { params: { id: listId } })).data;
+  const lr = list.recipes.find(x => x.recipeId === soupA);
+  const master = (await call('owner', 'getRecipe', { params: { id: soupA } })).data.recipe;
+  const butter = master.ingredients.find(i => i.name === 'butter').id;
+  await call('owner', 'updateListRecipe', { body: { id: lr.id, scaleMode: 'servings', scaleValue: 12, excludedIngredientIds: [butter] } });
+  assert.equal(find(await items(), 'butter'), undefined);
+  assert.ok(find(await items(), 'red pepper flakes'), 'explicit choices replace the optional-off default');
+});
+
+// ---- Sharing a list and live updates ------------------------------------------
+
+let seq = 0;
+await test('list sharing: editor can check items; outsider sees nothing (acceptance 11)', async () => {
+  assert.equal((await call('owner', 'addListMember', { body: { listId, username: 'elaine@test', role: 'editor' } })).status, 200);
+  assert.equal((await call('outsider', 'getList', { params: { id: listId } })).status, 404);
+  assert.equal((await call('outsider', 'listChanges', { params: { id: listId, since: 0 } })).status, 404);
+  assert.ok(!(await call('outsider', 'listLists')).data.lists.some(l => l.id === listId));
+  seq = (await call('elaine', 'getList', { params: { id: listId } })).data.list.changeSeq;
+});
+await test('live updates: a check on one device shows up on the other (acceptance 10)', async () => {
+  const unchanged = await call('elaine', 'listChanges', { params: { id: listId, since: seq } });
+  assert.equal(unchanged.data.unchanged, true);
+  const milk = find(await items(), 'milk');
+  assert.equal((await call('owner', 'setItemChecked', { body: { id: milk.id, checked: true } })).status, 200);
+  const ch = await call('elaine', 'listChanges', { params: { id: listId, since: seq } });
+  assert.ok(ch.data.changeSeq > seq);
+  assert.deepEqual(ch.data.items.map(i => [i.id, i.checked]), [[milk.id, true]]);
+  seq = ch.data.changeSeq;
+});
+await test('check is idempotent: both tapping "checked" leaves it checked, with no extra change', async () => {
+  const milk = find(await items(), 'milk');
+  await call('elaine', 'setItemChecked', { body: { id: milk.id, checked: true } });
+  assert.equal((await call('elaine', 'listChanges', { params: { id: listId, since: seq } })).data.unchanged, true);
+  assert.equal(find(await items('elaine'), 'milk').checked, true);
+});
+await test('deletions reach other devices', async () => {
+  const plates = find(await items(), 'paper plates');
+  await call('elaine', 'deleteItem', { body: { id: plates.id } });
+  const ch = await call('owner', 'listChanges', { params: { id: listId, since: seq } });
+  assert.deepEqual(ch.data.deleted, [plates.id]);
+  seq = ch.data.changeSeq;
+});
+await test('a viewer can read but not change the list', async () => {
+  await call('owner', 'addListMember', { body: { listId, username: 'michelle@test', role: 'viewer' } });
+  const milk = find(await items('michelle'), 'milk');
+  assert.equal((await call('michelle', 'setItemChecked', { body: { id: milk.id, checked: false } })).status, 403);
+  assert.equal((await call('michelle', 'addItem', { body: { listId, label: 'cake' } })).status, 403);
+  assert.equal((await call('michelle', 'addListMember', { body: { listId, username: 'outsider@test', role: 'owner' } })).status, 403);
+});
+await test('assigned-to must be someone on the list', async () => {
+  const beans = find(await items(), 'black beans');
+  const r = await call('owner', 'updateItem', { body: { id: beans.id, changes: { assignedUserId: elaineId }, base: { assignedUserId: null } } });
+  assert.equal(r.data.item.assignedUserId, elaineId);
+});
+await test('last owner of a list cannot leave', async () => {
+  assert.equal((await call('owner', 'removeListMember', { body: { listId, userId: ownerId } })).status, 409);
+});
+
+// ---- Completed lists, copies, deletion ------------------------------------------
+
+await test('complete, then copy to a fresh unchecked list', async () => {
+  assert.equal((await call('elaine', 'updateList', { body: { id: listId, status: 'completed' } })).status, 200);
+  assert.equal((await call('elaine', 'updateList', { body: { id: listId, title: 'Hijacked' } })).status, 403, 'only the owner renames');
+  const mine = (await call('owner', 'listLists')).data.lists.find(l => l.id === listId);
+  assert.equal(mine.status, 'completed');
+  const copy = await call('elaine', 'copyList', { body: { id: listId, title: 'Christmas Social 2027' } });
+  assert.equal(copy.status, 200);
+  const got = (await call('elaine', 'getList', { params: { id: copy.data.id } })).data;
+  assert.equal(got.list.role, 'owner');
+  assert.equal(got.items.filter(i => i.checked).length, 0);
+  assert.equal(got.items.length, (await items()).length);
+  assert.equal(got.recipes.length, 2, 'Soup A and the lasagna (Soup B was removed)');
+  assert.equal((await call('owner', 'getList', { params: { id: copy.data.id } })).status, 404, 'the copy is Elaine\'s alone');
+  const lr = got.recipes.find(x => x.recipeId === lasagna);
+  assert.equal((await call('elaine', 'removeListRecipe', { body: { id: lr.id } })).status, 200);
+  assert.equal(find((await call('elaine', 'getList', { params: { id: copy.data.id } })).data.items, 'lasagna noodles'), undefined);
+  assert.ok(find(await items(), 'lasagna noodles'), 'the original list is untouched');
+});
+await test('only the owner deletes a list', async () => {
+  assert.equal((await call('elaine', 'deleteList', { body: { id: listId } })).status, 403);
+  assert.equal((await call('owner', 'deleteList', { body: { id: listId } })).status, 200);
+  assert.equal((await call('elaine', 'getList', { params: { id: listId } })).status, 404);
+});
+await test('no meal planner anywhere in the API (acceptance 12)', async () => {
+  for (const action of ['mealPlan', 'getMealPlan', 'scheduleMeal', 'planMeals']) {
+    assert.equal((await call('owner', action)).status, 404);
+  }
+});
+
 // ---- Admin import ----------------------------------------------------------
 
 await test('only a Hub admin can run the import', async () => {

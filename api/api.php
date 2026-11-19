@@ -6,6 +6,7 @@
 require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/lib/core.php';
 require_once __DIR__ . '/lib/recipes.php';
+require_once __DIR__ . '/lib/shopping.php';
 
 ini_set('display_errors', '0');
 header('Content-Type: application/json; charset=utf-8');
@@ -566,6 +567,389 @@ try {
       }
       exec_('DELETE FROM sft_recipe_members WHERE recipe_id = ? AND user_id = ?', 'ii', [$id, $memberId]);
       audit($uid, 'recipe', $id, $memberId === $uid ? 'member_left' : 'member_removed', "user $memberId ($current)");
+      respond(['ok' => true]);
+    }
+
+    // ---- Scaling (personal) ------------------------------------------------
+
+    // Remembers "I make this as 2 pans" for this user only; the master recipe never changes.
+    case 'setSavedScale': {
+      requirePost();
+      $b = body();
+      $id = intParam($b, 'recipeId');
+      requireViewRecipe($uid, $id);
+      $mode = null;
+      $value = null;
+      if (($b['value'] ?? null) !== null && $b['value'] !== '') {
+        $mode = scaleModeParam($b);
+        $value = cleanNumber($b['value'], 'value', 10000);
+      }
+      exec_('INSERT INTO sft_recipe_user_state (recipe_id, user_id, saved_scale_mode, saved_scale) VALUES (?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE saved_scale_mode = VALUES(saved_scale_mode), saved_scale = VALUES(saved_scale)',
+        'iisd', [$id, $uid, $mode, $value]);
+      respond(['ok' => true]);
+    }
+
+    // ---- Shopping lists ----------------------------------------------------
+
+    case 'listLists': {
+      $rows = q(
+        "SELECT l.id, l.title, l.status, l.updated_at, l.completed_at, m.role,
+                (SELECT COUNT(*) FROM sft_shopping_items i WHERE i.list_id = l.id AND i.deleted_at IS NULL
+                   AND i.quantity IS NOT NULL AND i.quantity > 0) AS items,
+                (SELECT COUNT(*) FROM sft_shopping_items i WHERE i.list_id = l.id AND i.deleted_at IS NULL
+                   AND i.quantity IS NOT NULL AND i.quantity > 0 AND i.checked = 1) AS checked_items,
+                (SELECT COUNT(*) FROM sft_shopping_list_members m2 WHERE m2.list_id = l.id) AS members
+           FROM sft_shopping_lists l JOIN sft_shopping_list_members m ON m.list_id = l.id AND m.user_id = ?
+          WHERE l.deleted_at IS NULL ORDER BY l.status = 'completed', COALESCE(l.completed_at, l.updated_at) DESC", 'i', [$uid]);
+      respond(['ok' => true, 'lists' => array_map(fn($r) => [
+        'id' => (int)$r['id'], 'title' => $r['title'], 'status' => $r['status'], 'role' => $r['role'],
+        'items' => (int)$r['items'], 'checked' => (int)$r['checked_items'], 'shared' => (int)$r['members'] > 1,
+        'updatedAt' => $r['updated_at'], 'completedAt' => $r['completed_at'],
+      ], $rows)]);
+    }
+
+    case 'createList': {
+      requirePost();
+      $title = textParam(body(), 'title', 150);
+      db()->begin_transaction();
+      $id = exec_('INSERT INTO sft_shopping_lists (title, created_by) VALUES (?, ?)', 'si', [$title, $uid]);
+      exec_("INSERT INTO sft_shopping_list_members (list_id, user_id, role, added_by) VALUES (?, ?, 'owner', ?)", 'iii', [$id, $uid, $uid]);
+      db()->commit();
+      respond(['ok' => true, 'id' => $id]);
+    }
+
+    case 'updateList': {
+      requirePost();
+      $b = body();
+      $id = intParam($b, 'id');
+      $role = requireListRole($uid, $id, ['owner', 'editor']);
+      if (array_key_exists('title', $b)) {
+        if ($role !== 'owner') { fail('Only the list\'s owner can rename it', 403); }
+        exec_('UPDATE sft_shopping_lists SET title = ? WHERE id = ?', 'si', [textParam($b, 'title', 150), $id]);
+      }
+      if (array_key_exists('status', $b)) {
+        $status = $b['status'] === 'completed' ? 'completed' : 'active';
+        exec_('UPDATE sft_shopping_lists SET status = ?, completed_at = ' . ($status === 'completed' ? 'NOW()' : 'NULL') . ' WHERE id = ?',
+          'si', [$status, $id]);
+      }
+      listSeq($id);
+      respond(['ok' => true]);
+    }
+
+    case 'deleteList': {
+      requirePost();
+      $id = intParam(body(), 'id');
+      requireListRole($uid, $id, ['owner']);
+      exec_('UPDATE sft_shopping_lists SET deleted_at = NOW() WHERE id = ?', 'i', [$id]);
+      audit($uid, 'shopping_list', $id, 'deleted');
+      respond(['ok' => true]);
+    }
+
+    // A fresh copy (everything unchecked) owned by the person copying — e.g. reuse last
+    // year's Thanksgiving list.
+    case 'copyList': {
+      requirePost();
+      $b = body();
+      $from = intParam($b, 'id');
+      requireListRole($uid, $from, ['owner', 'editor', 'viewer']);
+      $title = textParam($b, 'title', 150);
+      db()->begin_transaction();
+      $id = exec_('INSERT INTO sft_shopping_lists (title, created_by) VALUES (?, ?)', 'si', [$title, $uid]);
+      exec_("INSERT INTO sft_shopping_list_members (list_id, user_id, role, added_by) VALUES (?, ?, 'owner', ?)", 'iii', [$id, $uid, $uid]);
+      $recipeMap = [];
+      foreach (q('SELECT * FROM sft_shopping_list_recipes WHERE list_id = ?', 'i', [$from]) as $lr) {
+        $recipeMap[(int)$lr['id']] = exec_(
+          'INSERT INTO sft_shopping_list_recipes (list_id, recipe_id, scale_mode, scale_value, scale_factor, excluded_ingredient_ids, added_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?)', 'iisddsi',
+          [$id, (int)$lr['recipe_id'], $lr['scale_mode'], (float)$lr['scale_value'], (float)$lr['scale_factor'], $lr['excluded_ingredient_ids'], $uid]);
+      }
+      foreach (q('SELECT * FROM sft_shopping_items WHERE list_id = ? AND deleted_at IS NULL ORDER BY position, id', 'i', [$from]) as $it) {
+        $newItem = exec_(
+          'INSERT INTO sft_shopping_items (list_id, ingredient_id, merge_key, label, quantity, unit, notes, department, department_manual,
+             store_id, is_manual, is_edited, position, updated_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', 'iissdsssiiiiii',
+          [$id, $it['ingredient_id'] !== null ? (int)$it['ingredient_id'] : null, $it['merge_key'], $it['label'],
+           $it['quantity'] !== null ? (float)$it['quantity'] : null, $it['unit'], $it['notes'], $it['department'],
+           (int)$it['department_manual'], $it['store_id'] !== null ? (int)$it['store_id'] : null, (int)$it['is_manual'],
+           (int)$it['is_edited'], (int)$it['position'], $uid]);
+        foreach (q('SELECT * FROM sft_shopping_item_sources WHERE item_id = ?', 'i', [(int)$it['id']]) as $s) {
+          if (!isset($recipeMap[(int)$s['list_recipe_id']])) { continue; }
+          exec_('INSERT INTO sft_shopping_item_sources (item_id, list_recipe_id, recipe_ingredient_id, contributed_quantity, contributed_unit)
+                 VALUES (?, ?, ?, ?, ?)', 'iiids',
+            [$newItem, $recipeMap[(int)$s['list_recipe_id']], (int)$s['recipe_ingredient_id'],
+             $s['contributed_quantity'] !== null ? (float)$s['contributed_quantity'] : null, $s['contributed_unit']]);
+        }
+      }
+      db()->commit();
+      respond(['ok' => true, 'id' => $id]);
+    }
+
+    case 'getList': {
+      $id = intParam($_GET, 'id');
+      $role = requireListRole($uid, $id, ['owner', 'editor', 'viewer']);
+      $l = q1('SELECT id, title, status, change_seq, completed_at FROM sft_shopping_lists WHERE id = ?', 'i', [$id]);
+      $items = listItems($id);
+      respond(['ok' => true, 'list' => [
+        'id' => (int)$l['id'], 'title' => $l['title'], 'status' => $l['status'], 'role' => $role,
+        'changeSeq' => (int)$l['change_seq'], 'completedAt' => $l['completed_at'],
+      ], 'items' => $items['items'], 'recipes' => listRecipes($id), 'members' => listMembersShort($id),
+        'stores' => storesFor($uid, $id), 'departments' => DEPT_ORDER, 'me' => $uid]);
+    }
+
+    // Polled by every open copy of the list: only what changed since `since`.
+    case 'listChanges': {
+      $id = intParam($_GET, 'id');
+      requireListRole($uid, $id, ['owner', 'editor', 'viewer']);
+      $since = (int)($_GET['since'] ?? 0);
+      $l = q1('SELECT title, status, change_seq FROM sft_shopping_lists WHERE id = ?', 'i', [$id]);
+      if ((int)$l['change_seq'] === $since) {
+        respond(['ok' => true, 'changeSeq' => $since, 'unchanged' => true]);
+      }
+      $changes = listItems($id, $since);
+      respond(['ok' => true, 'changeSeq' => (int)$l['change_seq'], 'title' => $l['title'], 'status' => $l['status'],
+        'items' => $changes['items'], 'deleted' => $changes['deleted'], 'recipes' => listRecipes($id),
+        'members' => listMembersShort($id), 'stores' => storesFor($uid, $id)]);
+    }
+
+    // ---- Recipes on a list -------------------------------------------------
+
+    case 'addRecipeToList': {
+      requirePost();
+      $b = body();
+      $listId = intParam($b, 'listId');
+      $recipeId = intParam($b, 'recipeId');
+      requireListRole($uid, $listId, ['owner', 'editor']);
+      requireViewRecipe($uid, $recipeId);
+      $existing = q1('SELECT id FROM sft_shopping_list_recipes WHERE list_id = ? AND recipe_id = ?', 'ii', [$listId, $recipeId]);
+      if ($existing) {
+        respond(['ok' => false, 'error' => 'That recipe is already on this list — change its amount there.',
+          'listRecipeId' => (int)$existing['id']], 409);
+      }
+      [$mode, $value, $factor, $excluded] = listRecipeSettings($recipeId, $b, $uid);
+      db()->begin_transaction();
+      $lrId = exec_('INSERT INTO sft_shopping_list_recipes (list_id, recipe_id, scale_mode, scale_value, scale_factor, excluded_ingredient_ids, added_by)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)', 'iisddsi', [$listId, $recipeId, $mode, $value, $factor, json_encode($excluded), $uid]);
+      contributeRecipe($listId, $lrId, $recipeId, $factor, $excluded, $uid);
+      exec_('UPDATE sft_shopping_lists SET updated_at = NOW() WHERE id = ?', 'i', [$listId]);
+      db()->commit();
+      respond(['ok' => true, 'listRecipeId' => $lrId]);
+    }
+
+    // New amount or different "have it" choices: take the old contribution out, put the new one in.
+    case 'updateListRecipe': {
+      requirePost();
+      $b = body();
+      $lr = q1('SELECT * FROM sft_shopping_list_recipes WHERE id = ?', 'i', [intParam($b, 'id')]);
+      if (!$lr || listRole($uid, (int)$lr['list_id']) === null) { notFound('Recipe on this list'); }
+      $listId = (int)$lr['list_id'];
+      requireListRole($uid, $listId, ['owner', 'editor']);
+      [$mode, $value, $factor, $excluded] = listRecipeSettings((int)$lr['recipe_id'], $b);
+      db()->begin_transaction();
+      withdrawRecipe($listId, (int)$lr['id'], $uid);
+      exec_('UPDATE sft_shopping_list_recipes SET scale_mode = ?, scale_value = ?, scale_factor = ?, excluded_ingredient_ids = ? WHERE id = ?',
+        'sddsi', [$mode, $value, $factor, json_encode($excluded), (int)$lr['id']]);
+      contributeRecipe($listId, (int)$lr['id'], (int)$lr['recipe_id'], $factor, $excluded, $uid);
+      db()->commit();
+      respond(['ok' => true]);
+    }
+
+    case 'removeListRecipe': {
+      requirePost();
+      $lr = q1('SELECT * FROM sft_shopping_list_recipes WHERE id = ?', 'i', [intParam(body(), 'id')]);
+      if (!$lr || listRole($uid, (int)$lr['list_id']) === null) { notFound('Recipe on this list'); }
+      $listId = (int)$lr['list_id'];
+      requireListRole($uid, $listId, ['owner', 'editor']);
+      db()->begin_transaction();
+      withdrawRecipe($listId, (int)$lr['id'], $uid);
+      exec_('DELETE FROM sft_shopping_list_recipes WHERE id = ?', 'i', [(int)$lr['id']]);
+      listSeq($listId);
+      db()->commit();
+      respond(['ok' => true]);
+    }
+
+    case 'rebuildList': {
+      requirePost();
+      $listId = intParam(body(), 'listId');
+      requireListRole($uid, $listId, ['owner', 'editor']);
+      db()->begin_transaction();
+      rebuildList($listId, $uid);
+      db()->commit();
+      respond(['ok' => true]);
+    }
+
+    // ---- Items -------------------------------------------------------------
+
+    case 'addItem': {
+      requirePost();
+      $b = body();
+      $listId = intParam($b, 'listId');
+      requireListRole($uid, $listId, ['owner', 'editor']);
+      $label = textParam($b, 'label', 200);
+      $qty = itemQuantity($b['quantity'] ?? null);
+      $unit = itemUnit($b['unit'] ?? null);
+      $dept = isset($b['department']) && $b['department'] !== '' ? cleanDepartment($b['department']) : guessDepartment($label);
+      $storeId = itemStore($uid, $listId, $b['storeId'] ?? null);
+      db()->begin_transaction();
+      $id = exec_(
+        'INSERT INTO sft_shopping_items (list_id, label, quantity, unit, notes, department, department_manual, store_id, is_manual, position, updated_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)', 'isdsssiiii',
+        [$listId, $label, $qty, $unit, textParam($b, 'notes', 255, false), $dept, isset($b['department']) && $b['department'] !== '' ? 1 : 0,
+         $storeId, nextItemPosition($listId), $uid]);
+      touchItem($listId, $id, $uid);
+      db()->commit();
+      respond(['ok' => true, 'item' => listItemById($id)]);
+    }
+
+    // Field-level compare-and-set: each changed field carries the value the editor started from.
+    // If someone else changed THAT field meanwhile, nothing is saved and the current item comes back.
+    case 'updateItem': {
+      requirePost();
+      $b = body();
+      $item = requireItem($uid, intParam($b, 'id'), ['owner', 'editor']);
+      $listId = (int)$item['list_id'];
+      $changes = (array)($b['changes'] ?? []);
+      $base = (array)($b['base'] ?? []);
+      $columns = ['label' => 'label', 'quantity' => 'quantity', 'unit' => 'unit', 'notes' => 'notes',
+        'department' => 'department', 'storeId' => 'store_id', 'assignedUserId' => 'assigned_user_id'];
+      foreach ($changes as $field => $_) {
+        if (!isset($columns[$field])) { fail('Unknown field ' . $field); }
+        if (!array_key_exists($field, $base) || !sameValue($field, $item[$columns[$field]], $base[$field])) {
+          $who = q1('SELECT u.id, u.username, u.display_name FROM users u WHERE u.id = ?', 'i', [(int)$item['updated_by']]);
+          respond(['ok' => false, 'conflict' => true, 'error' => 'Someone else changed this item first.',
+            'changedBy' => $who ? publicUser($who) : null, 'item' => listItemById((int)$item['id'])], 409);
+        }
+      }
+      $set = [];
+      $types = '';
+      $params = [];
+      $add = function (string $col, string $t, $v) use (&$set, &$types, &$params) { $set[] = "$col = ?"; $types .= $t; $params[] = $v; };
+      if (array_key_exists('label', $changes)) {
+        $label = textParam($changes, 'label', 200);
+        $add('label', 's', $label);
+        if (!(int)$item['department_manual'] && !array_key_exists('department', $changes)) { $add('department', 's', guessDepartment($label)); }
+      }
+      if (array_key_exists('quantity', $changes)) { $add('quantity', 'd', itemQuantity($changes['quantity'])); }
+      if (array_key_exists('unit', $changes)) { $add('unit', 's', itemUnit($changes['unit'])); }
+      if (array_key_exists('notes', $changes)) { $add('notes', 's', textParam($changes, 'notes', 255, false)); }
+      if (array_key_exists('department', $changes)) { $add('department', 's', cleanDepartment($changes['department'])); $add('department_manual', 'i', 1); }
+      if (array_key_exists('storeId', $changes)) { $add('store_id', 'i', itemStore($uid, $listId, $changes['storeId'])); }
+      if (array_key_exists('assignedUserId', $changes)) {
+        $assignee = $changes['assignedUserId'] === null || $changes['assignedUserId'] === '' ? null : (int)$changes['assignedUserId'];
+        if ($assignee !== null && listRole($assignee, $listId) === null) { fail('They aren\'t on this list', 400, 'assignedUserId'); }
+        $add('assigned_user_id', 'i', $assignee);
+      }
+      // Hand-typed amounts are kept when more recipes are added (§6.4).
+      if (!(int)$item['is_manual'] && array_intersect(['label', 'quantity', 'unit'], array_keys($changes))) {
+        $add('is_edited', 'i', 1);
+        $add('needs_review', 'i', 0);
+      }
+      if ($set) {
+        db()->begin_transaction();
+        $types .= 'i';
+        $params[] = (int)$item['id'];
+        exec_('UPDATE sft_shopping_items SET ' . implode(', ', $set) . ' WHERE id = ?', $types, $params);
+        touchItem($listId, (int)$item['id'], $uid);
+        db()->commit();
+      }
+      respond(['ok' => true, 'item' => listItemById((int)$item['id'])]);
+    }
+
+    // Sends the wanted state, not a toggle — two people tapping eggs at once both end with eggs checked.
+    case 'setItemChecked': {
+      requirePost();
+      $b = body();
+      $item = requireItem($uid, intParam($b, 'id'), ['owner', 'editor']);
+      $checked = !empty($b['checked']) ? 1 : 0;
+      if ((int)$item['checked'] !== $checked) {
+        db()->begin_transaction();
+        exec_('UPDATE sft_shopping_items SET checked = ?, checked_by = ?, checked_at = ' . ($checked ? 'NOW()' : 'NULL') . ' WHERE id = ?',
+          'iii', [$checked, $checked ? $uid : null, (int)$item['id']]);
+        touchItem((int)$item['list_id'], (int)$item['id'], $uid);
+        db()->commit();
+      }
+      respond(['ok' => true, 'item' => listItemById((int)$item['id'])]);
+    }
+
+    case 'deleteItem': {
+      requirePost();
+      $item = requireItem($uid, intParam(body(), 'id'), ['owner', 'editor']);
+      db()->begin_transaction();
+      exec_('UPDATE sft_shopping_items SET deleted_at = NOW() WHERE id = ?', 'i', [(int)$item['id']]);
+      exec_('DELETE FROM sft_shopping_item_sources WHERE item_id = ?', 'i', [(int)$item['id']]);
+      touchItem((int)$item['list_id'], (int)$item['id'], $uid);
+      db()->commit();
+      respond(['ok' => true]);
+    }
+
+    case 'addStore': {
+      requirePost();
+      $name = textParam(body(), 'name', 80);
+      $existing = q1("SELECT id FROM sft_stores WHERE name = ? AND (scope = 'system' OR (scope = 'user' AND owner_user_id = ?))", 'si', [$name, $uid]);
+      $id = $existing ? (int)$existing['id']
+        : exec_("INSERT INTO sft_stores (name, scope, owner_user_id) VALUES (?, 'user', ?)", 'si', [$name, $uid]);
+      respond(['ok' => true, 'store' => ['id' => $id, 'name' => $name]]);
+    }
+
+    // ---- List sharing ------------------------------------------------------
+
+    case 'listMembers': {
+      $id = intParam($_GET, 'id');
+      requireListRole($uid, $id, ['owner', 'editor', 'viewer']);
+      respond(['ok' => true, 'members' => listMembersShort($id)]);
+    }
+
+    case 'addListMember': {
+      requirePost();
+      $b = body();
+      $id = intParam($b, 'listId');
+      requireListRole($uid, $id, ['owner']);
+      $role = roleParam($b, ['owner', 'editor', 'viewer']);
+      $invitee = userByUsername((string)($b['username'] ?? ''));
+      if (!$invitee) { fail('No My Apps Hub account uses that username. They need to sign up on the Hub first.', 404, 'username'); }
+      $inviteeId = (int)$invitee['id'];
+      if (listRole($inviteeId, $id) !== null) { fail('They\'re already on this list', 409, 'username'); }
+      exec_('INSERT INTO sft_shopping_list_members (list_id, user_id, role, added_by) VALUES (?, ?, ?, ?)', 'iisi', [$id, $inviteeId, $role, $uid]);
+      grantAppAccess($inviteeId);
+      listSeq($id);
+      audit($uid, 'shopping_list', $id, 'member_added', "user $inviteeId as $role");
+      respond(['ok' => true, 'member' => publicUser($invitee) + ['role' => $role]]);
+    }
+
+    case 'setListMemberRole': {
+      requirePost();
+      $b = body();
+      $id = intParam($b, 'listId');
+      $memberId = intParam($b, 'userId');
+      requireListRole($uid, $id, ['owner']);
+      $role = roleParam($b, ['owner', 'editor', 'viewer']);
+      $current = listRole($memberId, $id);
+      if ($current === null) { notFound('Member'); }
+      if ($current === 'owner' && $role !== 'owner' && ownerCount('sft_shopping_list_members', 'list_id', $id, 'owner') <= 1) {
+        fail('A list needs at least one owner. Make someone else an owner first.', 409);
+      }
+      exec_('UPDATE sft_shopping_list_members SET role = ? WHERE list_id = ? AND user_id = ?', 'sii', [$role, $id, $memberId]);
+      listSeq($id);
+      audit($uid, 'shopping_list', $id, 'role_changed', "user $memberId: $current → $role");
+      respond(['ok' => true]);
+    }
+
+    case 'removeListMember': {
+      requirePost();
+      $b = body();
+      $id = intParam($b, 'listId');
+      $memberId = intParam($b, 'userId');
+      if ($memberId === $uid) { requireListRole($uid, $id, ['owner', 'editor', 'viewer']); }
+      else { requireListRole($uid, $id, ['owner']); }
+      $current = listRole($memberId, $id);
+      if ($current === null) { notFound('Member'); }
+      if ($current === 'owner' && ownerCount('sft_shopping_list_members', 'list_id', $id, 'owner') <= 1) {
+        fail('A list needs at least one owner. Make someone else an owner first, or delete the list.', 409);
+      }
+      exec_('DELETE FROM sft_shopping_list_members WHERE list_id = ? AND user_id = ?', 'ii', [$id, $memberId]);
+      exec_('UPDATE sft_shopping_items SET assigned_user_id = NULL WHERE list_id = ? AND assigned_user_id = ?', 'ii', [$id, $memberId]);
+      listSeq($id);
+      audit($uid, 'shopping_list', $id, $memberId === $uid ? 'member_left' : 'member_removed', "user $memberId ($current)");
       respond(['ok' => true]);
     }
 

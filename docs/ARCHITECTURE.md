@@ -188,6 +188,8 @@ because live updates arrive in the background (§6.7).
 | Shopping mode groups by department             | Toggle **By department / By store** (store view sub-groups by department) |
 | Reset discards everything                      | **Rebuild from recipes** discards edits to recipe items, but **keeps items you added by hand** |
 | No history                                     | **Mark complete**, keep, reopen or copy a past list            |
+| First keyword match picks the department ("cornstarch" → Produce) | **Longest** keyword match wins ("cornstarch" → Baking, "garlic powder" → Spices) |
+| Combined amounts shown to 0.01 ("9.92 tbsp")   | Rounded **up** to a kitchen fraction ("10 tbsp", "5⅓ tbsp"); counts up to whole |
 
 Favorites still exist (personal ♥ on recipes), but they no longer drive the list.
 
@@ -227,7 +229,8 @@ Anything else becomes a separate item, with all source recipes listed under it. 
 **split** a merged item back into its sources.
 
 Quantities are stored as `DECIMAL(12,4)` and displayed as friendly fractions (⅓, ½, 1¼).
-Count items round up to whole numbers in the list ("2.5 onions" → 3), the original
+On the list, combined measured amounts round **up** to the nearest kitchen fraction
+(⅛ ¼ ⅓ ½ ⅔ ¾ ⅞) and count items up to whole numbers ("2.5 onions" → 3); the exact
 contribution is kept in the source rows.
 
 ### 6.6 Department and store
@@ -253,7 +256,8 @@ contribution is kept in the source rows.
   current item and the app shows "Changed by Elaine — your edit wasn't saved" on that row.
   Nothing is silently lost.
 - Incoming updates are applied **row by row** and never to the row whose input currently has
-  focus (it's updated when focus leaves).
+  focus; that row is refreshed when focus leaves it. Rows that change group (department or
+  store) wait for a full redraw until you stop typing.
 - Only list members can call `listChanges`; it is checked on every poll.
 
 ---

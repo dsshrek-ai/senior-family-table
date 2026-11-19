@@ -13,7 +13,7 @@
 <script src="js/app.js"></script>
 <script>
 const main = renderShell('');
-const type = param('type') === 'recipe' ? 'recipe' : 'cookbook';
+const type = ['recipe', 'list'].includes(param('type')) ? param('type') : 'cookbook';
 const id = Number(param('id'));
 let me = null;
 let title = '';
@@ -21,7 +21,17 @@ let canManage = false;
 let members = [];
 
 // Per-type wiring: roles, API actions, and the plain-language explanation.
-const T = type === 'cookbook' ? {
+const LIST_T = {
+  roles: ['owner', 'editor', 'viewer'], top: 'owner',
+  list: 'listMembers', add: 'addListMember', setRole: 'setListMemberRole', remove: 'removeListMember',
+  key: 'listId', back: () => `list.html?id=${id}`,
+  help: `<ul>
+    <li><strong>Owner</strong> — rename or delete the list and choose who's on it.</li>
+    <li><strong>Editor</strong> — add items and recipes, change amounts and stores, and check things off.</li>
+    <li><strong>Viewer</strong> — see the list, including what's been checked off.</li></ul>
+    <p class="hint">Everyone on the list sees changes within a few seconds — check off the eggs on one phone and they're checked on the other.</p>`,
+};
+const T = type === 'list' ? LIST_T : type === 'cookbook' ? {
   roles: ['owner', 'editor', 'viewer'], top: 'owner',
   list: 'cookbookMembers', add: 'addCookbookMember', setRole: 'setCookbookMemberRole', remove: 'removeCookbookMember',
   key: 'cookbookId', back: () => `cookbook.html?id=${id}`,
@@ -48,7 +58,7 @@ function render() {
     `<option value="${r}"${r === m.role ? ' selected' : ''}>${ROLE_LABELS[r]}</option>`).join('')}</select>`;
   main.innerHTML = `
     <p><a href="${T.back()}">← ${escapeHtml(title)}</a></p>
-    <h1>${type === 'cookbook' ? 'Who\'s in this cookbook' : 'Who can edit this recipe'}</h1>
+    <h1>${type === 'cookbook' ? 'Who\'s in this cookbook' : type === 'list' ? 'Who\'s on this list' : 'Who can edit this recipe'}</h1>
     <div class="card">
       <ul class="people">${members.map(m => `<li>
         <span class="who"><strong>${escapeHtml(m.name)}</strong>${m.id === me.id ? ' <span class="muted">(you)</span>' : ''}</span>
@@ -88,7 +98,7 @@ function render() {
     if (!confirm(leaving ? `Leave this ${type}? You'll lose access unless you're in it some other way.` : `Remove ${m.name}?`)) { return; }
     try {
       await apiPost(T.remove, { [T.key]: id, userId: uid });
-      if (leaving) { window.location.href = 'index.html'; return; }
+      if (leaving) { window.location.href = type === 'list' ? 'lists.html' : 'index.html'; return; }
       toast('Removed');
       await load();
     } catch (e) { alert(e.message); }
@@ -113,6 +123,10 @@ async function load() {
     const res = await apiGet('getCookbook', { id });
     title = res.cookbook.title;
     canManage = res.cookbook.role === 'owner';
+  } else if (type === 'list') {
+    const res = await apiGet('getList', { id });
+    title = res.list.title;
+    canManage = res.list.role === 'owner';
   } else {
     const res = await apiGet('getRecipe', { id });
     title = res.recipe.title;

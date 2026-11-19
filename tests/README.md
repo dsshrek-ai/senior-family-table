@@ -4,7 +4,8 @@ Two suites, both run against a local copy of the site and a **fresh** test datab
 
 | File | What it checks |
 | ---- | -------------- |
-| `api.test.mjs` | 51 HTTP tests: sign-in, app access, every permission rule (ARCHITECTURE.md §3), cookbook sharing, the recipe editor (in-place rows, conflicts), history and restore, recipe sharing, linking, search, favorites, delete/restore, and the Senior Family import. |
+| `api.test.mjs` | 75 HTTP tests: sign-in, app access, every permission rule (ARCHITECTURE.md §3), cookbook sharing, the recipe editor (in-place rows, conflicts), history and restore, recipe sharing, linking, search, favorites, delete/restore, saved scale, shopping lists (combining rules, serving/batch scale, "have it", remove/rebuild, stores, compare-and-set edits, live changes, sharing, copies), and the Senior Family import. |
+| `ui-lists.mjs` | 12 browser steps: scaling and remembered amounts, the add-to-list panel, adding several recipes from a cookbook, edit mode (stepper, department, store, notes, hand-added items), zero = not needed, shopping mode and Checked Off, by-store view, a second phone seeing a check within seconds, typing never overwritten by another device's change, rebuild, mark as done. |
 | `ui-walkthrough.mjs` | 16 browser steps in headless Edge: sign-in, cookbooks, filtering, favorites, recipe page, editor (save, field errors, two-person conflict), history restore, new recipe with a cooking method, adding to a second cookbook, sharing, a viewer's view, search, and phone layout (no sideways scrolling). Fails on any console error or missing file. |
 
 ## Setup
@@ -36,5 +37,7 @@ npm install playwright-core      # once, outside the repo
 BASE_URL=http://127.0.0.1:8100 node tests/ui-walkthrough.mjs ./screenshots
 ```
 
-Last run 2026-11-19 (MariaDB 11.4, PHP 8.3, Edge): API 51/51 passed; walkthrough 16/16 passed,
-no console errors.
+Each walkthrough needs its own fresh database.
+
+Last run 2026-11-19 (MariaDB 11.4, PHP 8.3, Edge): API 75/75; recipe walkthrough 16/16;
+lists walkthrough 12/12; no console errors.
