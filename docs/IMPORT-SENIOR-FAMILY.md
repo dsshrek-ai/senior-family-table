@@ -116,6 +116,9 @@ report of all of them.
 
 ## 8. After the import
 
-The old Senior Family Cookbook app keeps working, untouched. Edits made there afterwards do
-**not** flow into The Senior Family Table. Once you're happy with the new app, decide whether
-to retire the old one or keep it as a public read-only view.
+The import ran on 2026-11-19 (190 recipes).
+
+**Decided (owner, 2026-11-19):** the old Senior Family Cookbook app stays in service — people still
+use it. The two apps now go their separate ways: changes made in the old app are **not** brought
+into The Senior Family Table, and there is no ongoing sync. The import is not re-run to pick up
+new or edited recipes.
