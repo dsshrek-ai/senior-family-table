@@ -141,6 +141,21 @@ visibleNotes(u, r)        = notes on r WHERE visibility = 'shared' OR author = u
 
 ---
 
+### 5.1 Notes, tags and sharing outside the family (decided 2026-11-19)
+
+- **Notes:** anyone who can see a recipe can add a note — **shared** (everyone who can see the
+  recipe) or **private** (only the author; never returned to anyone else, including co-owners,
+  and never in search results, PDFs or exports for others). Authors edit and delete their own
+  notes; co-owners may also remove shared notes (audited). Search covers notes the person can see.
+- **Who can tag:** built-in tags — people who can edit the recipe; cookbook tags — that
+  cookbook's owners and editors; "My tags" — anyone, seen only by them. New tag names are tidied
+  (spaces collapsed, words capitalised unless already capitalised) and never duplicated in the
+  same place. Cookbook pages filter by several tags at once (all must match).
+- **Send as PDF:** a recipe can go to someone without an account as a PDF built in the browser
+  (vendored jsPDF, `js/vendor/`), at the amount currently shown. Phones and tablets open the
+  share sheet (Messages, Mail); computers download it. Never includes private notes. No public
+  links are created, so nothing new is exposed on the server.
+
 ## 6. Shopping lists — the Senior Family Cookbook way, extended
 
 ### 6.1 How the Senior Family Cookbook does it today (reference)

@@ -684,6 +684,93 @@ await test('no meal planner anywhere in the API (acceptance 12)', async () => {
   }
 });
 
+// ---- Family notes ----------------------------------------------------------------
+
+let sharedNote = 0;
+let privateNote = 0;
+await test('notes: anyone who can see a recipe can add shared and private notes', async () => {
+  const s = await call('elaine', 'addNote', { body: { recipeId: soup, visibility: 'shared', text: 'Grandma added extra cumin.' } });
+  assert.equal(s.status, 200);
+  sharedNote = s.data.note.id;
+  const p = await call('elaine', 'addNote', { body: { recipeId: soup, visibility: 'private', text: 'My secret zzpepita trick.' } });
+  privateNote = p.data.note.id;
+  assert.equal(p.data.note.mine, true);
+  assert.equal((await call('outsider', 'addNote', { body: { recipeId: soup, visibility: 'shared', text: 'hi' } })).status, 404);
+  assert.equal((await call('elaine', 'addNote', { body: { recipeId: soup, visibility: 'public', text: 'x' } })).data.field, 'visibility');
+});
+await test('notes: a private note never reaches anyone else — not even the co-owner', async () => {
+  const texts = (await call('owner', 'getRecipe', { params: { id: soup } })).data.recipe.notes.map(n => n.text);
+  assert.ok(texts.includes('Grandma added extra cumin.'));
+  assert.ok(!texts.includes('My secret zzpepita trick.'));
+  assert.equal((await call('owner', 'updateNote', { body: { id: privateNote, text: 'x' } })).status, 404);
+  assert.equal((await call('owner', 'deleteNote', { body: { id: privateNote } })).status, 404);
+});
+await test('notes: search honors note visibility', async () => {
+  assert.ok((await call('elaine', 'searchRecipes', { params: { q: 'zzpepita' } })).data.recipes.some(r => r.id === soup));
+  assert.equal((await call('owner', 'searchRecipes', { params: { q: 'zzpepita' } })).data.recipes.length, 0);
+  assert.ok((await call('owner', 'searchRecipes', { params: { q: 'extra cumin' } })).data.recipes.some(r => r.id === soup));
+});
+await test('notes: only the author edits; author can make it private', async () => {
+  assert.equal((await call('owner', 'updateNote', { body: { id: sharedNote, text: 'changed' } })).status, 403);
+  const r = await call('elaine', 'updateNote', { body: { id: sharedNote, text: 'Grandma added extra cumin!', visibility: 'private' } });
+  assert.equal(r.status, 200);
+  assert.equal(r.data.note.visibility, 'private');
+  assert.ok(!(await call('owner', 'getRecipe', { params: { id: soup } })).data.recipe.notes.some(n => n.id === sharedNote));
+  await call('elaine', 'updateNote', { body: { id: sharedNote, text: 'Grandma added extra cumin!', visibility: 'shared' } });
+});
+await test('notes: a co-owner may remove someone else\'s shared note (audited)', async () => {
+  assert.equal((await call('owner', 'deleteNote', { body: { id: sharedNote } })).status, 200);
+  assert.ok(!(await call('elaine', 'getRecipe', { params: { id: soup } })).data.recipe.notes.some(n => n.id === sharedNote));
+  assert.equal(Number(sql(`SELECT COUNT(*) FROM sft_audit_events WHERE resource_type = 'note' AND resource_id = ${sharedNote}`)), 1);
+  assert.equal((await call('elaine', 'deleteNote', { body: { id: privateNote } })).status, 200);
+});
+
+// ---- Tags ------------------------------------------------------------------------
+
+let christmas = 0;
+await test('tags: built-in tags need edit rights on the recipe', async () => {
+  const choices = (await call('owner', 'tagChoices', { params: { recipeId: soup } })).data;
+  assert.equal(choices.canEditBuiltIn, true);
+  const dessert = choices.builtIn.find(t => t.name === 'Dessert');
+  assert.equal((await call('owner', 'setRecipeTag', { body: { recipeId: soup, tagId: dessert.id, on: true } })).status, 200);
+  assert.ok((await call('owner', 'getRecipe', { params: { id: soup } })).data.recipe.tags.some(t => t.name === 'Dessert'));
+  assert.equal((await call('elaine', 'tagChoices', { params: { recipeId: soup } })).data.canEditBuiltIn, false);
+  assert.equal((await call('elaine', 'setRecipeTag', { body: { recipeId: soup, tagId: dessert.id, on: false } })).status, 403);
+  await call('owner', 'setRecipeTag', { body: { recipeId: soup, tagId: dessert.id, on: false } });
+});
+await test('tags: cookbook tags — tidy names, no duplicates, used by cookbook editors', async () => {
+  const r = await call('owner', 'createTag', { body: { scope: 'cookbook', cookbookId: familyBook, name: '  christmas   dinner ' } });
+  assert.equal(r.data.tag.name, 'Christmas Dinner');
+  christmas = r.data.tag.id;
+  const again = await call('owner', 'createTag', { body: { scope: 'cookbook', cookbookId: familyBook, name: 'CHRISTMAS DINNER' } });
+  assert.deepEqual([again.data.tag.id, again.data.existed], [christmas, true]);
+  assert.equal((await call('elaine', 'setRecipeTag', { body: { recipeId: soup, tagId: christmas, on: true } })).status, 200, 'Elaine owns the cookbook');
+  assert.equal((await call('outsider', 'setRecipeTag', { body: { recipeId: soup, tagId: christmas, on: true } })).status, 404);
+  assert.equal((await call('outsider', 'createTag', { body: { scope: 'cookbook', cookbookId: familyBook, name: 'Spam' } })).status, 404);
+});
+await test('tags: personal tags are seen only by their owner', async () => {
+  const mine = (await call('elaine', 'createTag', { body: { name: 'elaine makes this' } })).data.tag;
+  assert.equal((await call('elaine', 'setRecipeTag', { body: { recipeId: soup, tagId: mine.id, on: true } })).status, 200);
+  assert.ok((await call('elaine', 'getRecipe', { params: { id: soup } })).data.recipe.tags.some(t => t.name === 'Elaine Makes This'));
+  assert.ok(!(await call('owner', 'getRecipe', { params: { id: soup } })).data.recipe.tags.some(t => t.name === 'Elaine Makes This'));
+  assert.equal((await call('owner', 'setRecipeTag', { body: { recipeId: soup, tagId: mine.id, on: false } })).status, 404);
+  assert.equal((await call('owner', 'renameTag', { body: { id: mine.id, name: 'mine now' } })).status, 404);
+});
+await test('tags: filter list for a cookbook, rename, clash, delete', async () => {
+  const tags = (await call('owner', 'cookbookTags', { params: { id: familyBook } })).data;
+  assert.equal(tags.canManage, true);
+  assert.ok(tags.tags.some(t => t.id === christmas && t.count === 1));
+  assert.ok(!tags.tags.some(t => t.name === 'Elaine Makes This'), 'someone else\'s personal tag never shows');
+  const builtIn = tags.tags.find(t => t.scope === 'system');
+  assert.equal((await call('owner', 'renameTag', { body: { id: builtIn.id, name: 'Mine' } })).status, 403);
+  const other = (await call('owner', 'createTag', { body: { scope: 'cookbook', cookbookId: familyBook, name: 'Easter' } })).data.tag;
+  assert.equal((await call('owner', 'renameTag', { body: { id: other.id, name: 'christmas dinner' } })).status, 409);
+  assert.equal((await call('elaine', 'renameTag', { body: { id: christmas, name: 'Holiday Dinner' } })).status, 200);
+  assert.ok((await call('owner', 'getRecipe', { params: { id: soup } })).data.recipe.tags.some(t => t.name === 'Holiday Dinner'));
+  assert.equal((await call('owner', 'deleteTag', { body: { id: christmas } })).status, 200);
+  assert.ok(!(await call('owner', 'getRecipe', { params: { id: soup } })).data.recipe.tags.some(t => t.name === 'Holiday Dinner'));
+});
+
 // ---- Admin import ----------------------------------------------------------
 
 await test('only a Hub admin can run the import', async () => {

@@ -12,6 +12,7 @@
 <script src="js/api.js"></script>
 <script src="js/app.js"></script>
 <script src="js/addtolist.js"></script>
+<script src="js/recipepdf.js"></script>
 <script>
 const main = renderShell('');
 const recipeId = Number(param('id'));
@@ -105,13 +106,16 @@ function render() {
         <button type="button" class="icon-btn fav no-print" id="fav" aria-pressed="${r.me.favorite}" aria-label="${r.me.favorite ? 'Remove from favorites' : 'Add to favorites'}">${r.me.favorite ? '★' : '☆'}</button>
       </div>
       ${facts.length ? `<div class="facts">${facts.map(f => `<span>${f}</span>`).join('')}</div>` : ''}
-      ${r.tags.length ? `<div>${r.tags.map(t => `<span class="pill">${escapeHtml(t.name)}</span>`).join('')}</div>` : ''}
+      <div>${r.tags.map(t => `<span class="pill${t.scope === 'user' ? ' muted' : ''}"${t.scope === 'user' ? ' title="Only you see this tag"' : ''}>${escapeHtml(t.name)}</span>`).join('')}
+        <button type="button" class="link-btn no-print" id="tags-btn" style="margin-left:4px">${r.tags.length ? 'Edit tags' : '+ Add tags'}</button></div>
+      <section class="card hidden no-print" id="tags-box" style="margin:12px 0 0;box-shadow:none" aria-label="Tags"></section>
       ${r.description ? `<div style="margin-top:12px">${formatText(r.description)}</div>` : ''}
       <div class="actions no-print">
         ${r.ingredients.length ? '<button type="button" class="btn" id="to-list">🛒 Add to shopping list</button>' : ''}
         ${r.canEdit ? `<a class="btn secondary" href="recipe-edit.html?id=${r.id}${fromCookbook ? `&cookbook=${fromCookbook}` : ''}">Edit</a>` : ''}
         <a class="btn secondary" href="share.html?type=recipe&id=${r.id}">${r.canManage ? 'Share' : 'People'}</a>
         <a class="btn secondary" href="history.html?id=${r.id}">History</a>
+        <button type="button" class="btn secondary" id="send-pdf" title="A PDF you can text or email to anyone — no account needed">📄 Send as PDF</button>
         <button type="button" class="btn secondary" onclick="window.print()">Print</button>
         ${r.canManage ? '<button type="button" class="btn danger" id="del">Delete</button>' : ''}
       </div>
@@ -123,9 +127,18 @@ function render() {
       <section class="card" aria-labelledby="steps-h"><h2 id="steps-h">Steps</h2>${stepsHtml()}</section>
     </div>
     ${r.generalNotes ? `<section class="card"><h2>Notes</h2>${formatText(r.generalNotes)}</section>` : ''}
-    ${r.notes.length ? `<section class="card"><h2>Family notes</h2>${r.notes.map(n => `
-      <div class="note${n.visibility === 'private' ? ' private' : ''}">${formatText(n.text)}
-        <div class="by">${escapeHtml(n.author.name)} · ${formatDateTime(n.createdAt)}${n.visibility === 'private' ? ' · Private — only you can see this' : ''}</div></div>`).join('')}</section>` : ''}
+    <section class="card${r.notes.length ? '' : ' no-print'}" aria-labelledby="notes-h"><h2 id="notes-h">Family notes</h2>
+      <div id="notes-list"></div>
+      <form class="no-print" id="note-form" novalidate style="margin-top:8px">
+        <label for="note-text" style="margin-top:0">Add a note</label>
+        <textarea id="note-text" data-field="text" rows="3" maxlength="5000" placeholder="Tips, changes you made, who loves it…"></textarea>
+        <div class="field-error" data-for="text"></div>
+        <fieldset style="border:0;padding:0;margin:8px 0 0"><legend class="muted" style="font-size:0.9rem">Who can see it</legend>
+          <label class="check" style="display:inline-flex;margin-right:16px"><input type="radio" name="vis" value="shared" checked> Everyone who can see this recipe</label>
+          <label class="check" style="display:inline-flex"><input type="radio" name="vis" value="private"> Only me</label></fieldset>
+        <div class="actions" style="margin-top:8px"><button type="submit" class="btn small">Add note</button></div>
+      </form>
+    </section>
     <section class="card no-print">
       <p style="margin:0 0 8px">${r.source ? `Source: ${escapeHtml(r.source)}<br>` : ''}
         In your cookbooks: ${r.cookbooks.length ? r.cookbooks.map(c => `<a href="cookbook.html?id=${c.id}">${escapeHtml(c.title)}</a>`).join(', ') : '<span class="muted">none</span>'}</p>
@@ -137,6 +150,10 @@ function render() {
 
   renderIngredients();
   wireScale();
+  renderNotes();
+  wireNotes();
+  document.getElementById('tags-btn').addEventListener('click', showTags);
+  document.getElementById('send-pdf').addEventListener('click', ev => sendPdf(ev.currentTarget));
   const toList = document.getElementById('to-list');
   if (toList) {
     toList.addEventListener('click', () => {
@@ -174,6 +191,175 @@ function render() {
       } catch (e) { toast(e.message); }
     });
   }
+}
+
+// ---- Family notes -------------------------------------------------------------
+
+function noteHtml(n) {
+  const canRemove = n.mine || (r.canManage && n.visibility === 'shared');
+  return `<div class="note${n.visibility === 'private' ? ' private' : ''}" data-note="${n.id}">
+    <div class="note-body">${formatText(n.text)}</div>
+    <div class="by">${escapeHtml(n.author.name)} · ${formatDateTime(n.createdAt)}${n.updatedAt !== n.createdAt ? ' (edited)' : ''}
+      ${n.visibility === 'private' ? ' · <strong>Private — only you can see this</strong>' : ''}
+      ${n.mine ? ' · <button type="button" class="link-btn no-print" data-note-edit>Edit</button>' : ''}
+      ${canRemove ? ` · <button type="button" class="link-btn no-print" data-note-del>${n.mine ? 'Delete' : 'Remove'}</button>` : ''}</div>
+  </div>`;
+}
+
+function renderNotes() {
+  const box = document.getElementById('notes-list');
+  box.innerHTML = r.notes.length ? r.notes.map(noteHtml).join('') : '<p class="muted no-print" style="margin:0">No notes yet.</p>';
+  box.querySelectorAll('[data-note]').forEach(el => {
+    const n = r.notes.find(x => x.id === Number(el.dataset.note));
+    const del = el.querySelector('[data-note-del]');
+    if (del) {
+      del.addEventListener('click', async () => {
+        if (!confirm(n.mine ? 'Delete your note?' : `Remove ${n.author.name}'s note for everyone?`)) { return; }
+        try {
+          await apiPost('deleteNote', { id: n.id });
+          r.notes = r.notes.filter(x => x !== n);
+          renderNotes();
+        } catch (e) { toast(e.message); }
+      });
+    }
+    const edit = el.querySelector('[data-note-edit]');
+    if (edit) {
+      edit.addEventListener('click', () => {
+        el.innerHTML = `<textarea rows="3" maxlength="5000" aria-label="Edit note">${escapeHtml(n.text)}</textarea>
+          <label class="check" style="margin:6px 0"><input type="checkbox"${n.visibility === 'private' ? ' checked' : ''}> Only me</label>
+          <div class="actions" style="margin-top:6px"><button type="button" class="btn small">Save</button>
+            <button type="button" class="btn small secondary">Cancel</button></div>`;
+        const [save, cancel] = el.querySelectorAll('button');
+        el.querySelector('textarea').focus();
+        cancel.addEventListener('click', renderNotes);
+        save.addEventListener('click', async () => {
+          try {
+            const res = await apiPost('updateNote', { id: n.id, text: el.querySelector('textarea').value,
+              visibility: el.querySelector('input[type="checkbox"]').checked ? 'private' : 'shared' });
+            Object.assign(n, res.note);
+            renderNotes();
+          } catch (e) { toast(e.message); }
+        });
+      });
+    }
+  });
+}
+
+function wireNotes() {
+  const form = document.getElementById('note-form');
+  form.addEventListener('submit', async ev => {
+    ev.preventDefault();
+    const btn = form.querySelector('button[type="submit"]');
+    btn.disabled = true;
+    try {
+      const res = await apiPost('addNote', { recipeId: r.id, text: document.getElementById('note-text').value,
+        visibility: form.querySelector('input[name="vis"]:checked').value });
+      r.notes.push(res.note);
+      document.getElementById('note-text').value = '';
+      form.querySelectorAll('.field-error').forEach(e => { e.textContent = ''; });
+      renderNotes();
+      toast(res.note.visibility === 'private' ? 'Private note added' : 'Note added');
+    } catch (e) {
+      showFieldError(form, e, null);
+    }
+    btn.disabled = false;
+  });
+}
+
+// ---- Tags -------------------------------------------------------------------
+
+async function showTags() {
+  const box = document.getElementById('tags-box');
+  box.classList.remove('hidden');
+  box.innerHTML = '<p class="muted">Loading tags…</p>';
+  let c;
+  try { c = await apiGet('tagChoices', { recipeId: r.id }); } catch (e) { box.textContent = e.message; return; }
+  const boxes = (tags, enabled) => tags.map(t => `<label class="check" style="display:inline-flex;margin:4px 14px 4px 0">
+    <input type="checkbox" data-tag="${t.id}"${t.on ? ' checked' : ''}${enabled ? '' : ' disabled'}> ${escapeHtml(t.name)}</label>`).join('');
+  const kinds = [['category', 'Categories'], ['method', 'Cooking methods'], ['descriptor', 'Descriptions']];
+  // Cookbooks can hold hundreds of tags (the Senior Family Cookbook has ~240), so a group shows
+  // only the tags already on this recipe, plus a box to find others or add a new one.
+  const groups = [
+    ...c.cookbooks.filter(b => b.canEdit || b.tags.some(t => t.on)).map(b => ({
+      key: `b${b.id}`, scope: 'cookbook', cookbookId: b.id, canEdit: b.canEdit, tags: b.tags,
+      title: `${escapeHtml(b.title)} tags <span class="muted" style="font-weight:normal">— everyone in that cookbook sees these</span>`,
+    })),
+    { key: 'mine', scope: 'user', cookbookId: null, canEdit: true, tags: c.mine,
+      title: 'My tags <span class="muted" style="font-weight:normal">— only you see these</span>' },
+  ];
+  const groupHtml = g => `<p style="margin:14px 0 0;font-weight:600">${g.title}</p>
+    <div>${boxes(g.tags.filter(t => t.on), g.canEdit) || '<span class="muted">None on this recipe.</span>'}</div>
+    ${g.canEdit ? `<input type="search" maxlength="80" data-find="${g.key}" placeholder="Find or add a tag…" aria-label="Find or add a tag" style="margin-top:6px">
+      <div data-matches="${g.key}"></div>` : ''}`;
+  box.innerHTML = `
+    <h3 style="margin-bottom:4px">Tags</h3>
+    ${kinds.map(([k, label]) => `<p style="margin:10px 0 0;font-weight:600">${label}</p>${boxes(c.builtIn.filter(t => t.kind === k), c.canEditBuiltIn)}`).join('')}
+    ${c.canEditBuiltIn ? '' : '<p class="hint">Only people who can edit this recipe can change these.</p>'}
+    ${groups.map(groupHtml).join('')}
+    <div class="actions"><button type="button" class="btn small" id="tags-done">Done</button></div>`;
+
+  // One handler for every tick box, including ones that appear while searching.
+  box.addEventListener('change', async ev => {
+    const cb = ev.target;
+    if (!cb.dataset || !cb.dataset.tag) { return; }
+    try {
+      await apiPost('setRecipeTag', { recipeId: r.id, tagId: Number(cb.dataset.tag), on: cb.checked });
+      const t = [...c.builtIn, ...c.mine, ...c.cookbooks.flatMap(b => b.tags)].find(x => x.id === Number(cb.dataset.tag));
+      if (t) { t.on = cb.checked; }
+    } catch (e) { cb.checked = !cb.checked; toast(e.message); }
+  });
+  for (const g of groups) {
+    const input = box.querySelector(`[data-find="${g.key}"]`);
+    if (!input) { continue; }
+    const out = box.querySelector(`[data-matches="${g.key}"]`);
+    const addNew = async () => {
+      const name = input.value.trim();
+      if (!name) { return; }
+      try {
+        const payload = { name, scope: g.scope };
+        if (g.cookbookId) { payload.cookbookId = g.cookbookId; }
+        const res = await apiPost('createTag', payload);
+        await apiPost('setRecipeTag', { recipeId: r.id, tagId: res.tag.id, on: true });
+        toast(`Tagged "${res.tag.name}"`);
+        showTags();
+      } catch (e) { toast(e.message); }
+    };
+    input.addEventListener('input', () => {
+      const term = input.value.trim().toLowerCase();
+      if (!term) { out.innerHTML = ''; return; }
+      const matches = g.tags.filter(t => !t.on && t.name.toLowerCase().includes(term)).slice(0, 12);
+      const exact = g.tags.some(t => t.name.toLowerCase() === term);
+      out.innerHTML = boxes(matches, true)
+        + (exact ? '' : `<button type="button" class="btn small secondary" data-add-new style="margin-top:6px">+ Add "${escapeHtml(input.value.trim())}"</button>`);
+      const btn = out.querySelector('[data-add-new]');
+      if (btn) { btn.addEventListener('click', addNew); }
+    });
+    input.addEventListener('keydown', ev => {
+      if (ev.key !== 'Enter') { return; }
+      ev.preventDefault();
+      const first = out.querySelector('[data-tag]');
+      if (first && !first.checked) { first.checked = true; first.dispatchEvent(new Event('change', { bubbles: true })); }
+      else { addNew(); }
+    });
+  }
+  document.getElementById('tags-done').addEventListener('click', () => load());
+}
+
+// ---- Send as PDF ----------------------------------------------------------------
+
+async function sendPdf(btn) {
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = 'Making PDF…';
+  try {
+    const scaled = Math.abs(factor() - 1) > 1e-9;
+    const result = await sendRecipePdf(r, factor(), scaled ? scaleLabel() : '');
+    if (result === 'downloaded') { toast('PDF downloaded — attach it to a text or email'); }
+  } catch (e) {
+    toast(e.message || 'Couldn\'t make the PDF');
+  }
+  btn.textContent = label;
+  btn.disabled = false;
 }
 
 function wireScale() {

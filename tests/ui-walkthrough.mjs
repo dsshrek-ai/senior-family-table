@@ -77,7 +77,7 @@ await step('recipe page shows ingredients, steps and facts', async () => {
 });
 
 await step('editor saves a change and the recipe shows version 2', async () => {
-  await desk.click('text=Edit');
+  await desk.locator('a.btn', { hasText: /^Edit$/ }).click();
   await desk.locator('#title').waitFor();
   await desk.fill('#servings', '10');
   await desk.click('#add-ing');
@@ -94,7 +94,7 @@ await step('editor saves a change and the recipe shows version 2', async () => {
 });
 
 await step('editor shows a field error beside a bad amount', async () => {
-  await desk.click('text=Edit');
+  await desk.locator('a.btn', { hasText: /^Edit$/ }).click();
   await desk.locator('#title').waitFor();
   await desk.locator('#ings .ing-row').first().locator('[data-k="quantity"]').fill('lots');
   await desk.click('#save');

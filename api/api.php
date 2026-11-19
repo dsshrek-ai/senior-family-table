@@ -7,6 +7,7 @@ require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/lib/core.php';
 require_once __DIR__ . '/lib/recipes.php';
 require_once __DIR__ . '/lib/shopping.php';
+require_once __DIR__ . '/lib/notes_tags.php';
 
 ini_set('display_errors', '0');
 header('Content-Type: application/json; charset=utf-8');
@@ -474,9 +475,11 @@ try {
                   OR EXISTS (SELECT 1 FROM sft_recipe_categories rc JOIN sft_categories c ON c.id = rc.category_id
                               WHERE rc.recipe_id = r.id AND LOWER(c.name) LIKE ? AND (c.scope = 'system'
                                 OR (c.scope = 'user' AND c.owner_user_id = ?)
-                                OR (c.scope = 'cookbook' AND EXISTS (SELECT 1 FROM sft_cookbook_members m WHERE m.cookbook_id = c.cookbook_id AND m.user_id = ?)))))";
-        $types .= 'sssii';
-        array_push($params, $like, $like, $like, $uid, $uid);
+                                OR (c.scope = 'cookbook' AND EXISTS (SELECT 1 FROM sft_cookbook_members m WHERE m.cookbook_id = c.cookbook_id AND m.user_id = ?))))
+                  OR EXISTS (SELECT 1 FROM sft_recipe_notes n WHERE n.recipe_id = r.id AND n.deleted_at IS NULL
+                              AND LOWER(n.note_text) LIKE ? AND (n.visibility = 'shared' OR n.user_id = ?)))";
+        $types .= 'sssiisi';
+        array_push($params, $like, $like, $like, $uid, $uid, $like, $uid);
       }
       if ($cookbookId !== null) {
         $sql .= ' AND EXISTS (SELECT 1 FROM sft_cookbook_recipes x WHERE x.recipe_id = r.id AND x.cookbook_id = ?)';
@@ -951,6 +954,145 @@ try {
       listSeq($id);
       audit($uid, 'shopping_list', $id, $memberId === $uid ? 'member_left' : 'member_removed', "user $memberId ($current)");
       respond(['ok' => true]);
+    }
+
+    // ---- Family notes (ARCHITECTURE.md §3.2, REQUIREMENTS.md §8) ------------
+    // Anyone who can see a recipe may add a note: "shared" (everyone who can see the recipe) or
+    // "private" (only the author, ever — not even co-owners). Authors edit and delete their own
+    // notes; co-owners may also remove shared notes.
+
+    case 'addNote': {
+      requirePost();
+      $b = body();
+      $recipeId = intParam($b, 'recipeId');
+      requireViewRecipe($uid, $recipeId);
+      $visibility = noteVisibility($b);
+      $text = textParam($b, 'text', 5000);
+      $id = exec_('INSERT INTO sft_recipe_notes (recipe_id, user_id, visibility, note_text) VALUES (?, ?, ?, ?)',
+        'iiss', [$recipeId, $uid, $visibility, $text]);
+      respond(['ok' => true, 'note' => noteById($id, $uid)]);
+    }
+
+    case 'updateNote': {
+      requirePost();
+      $b = body();
+      $note = visibleNote($uid, intParam($b, 'id'));
+      if ((int)$note['user_id'] !== $uid) { fail('Only the person who wrote a note can change it', 403); }
+      $text = textParam($b, 'text', 5000);
+      $visibility = array_key_exists('visibility', $b) ? noteVisibility($b) : $note['visibility'];
+      exec_('UPDATE sft_recipe_notes SET note_text = ?, visibility = ? WHERE id = ?', 'ssi', [$text, $visibility, (int)$note['id']]);
+      respond(['ok' => true, 'note' => noteById((int)$note['id'], $uid)]);
+    }
+
+    case 'deleteNote': {
+      requirePost();
+      $note = visibleNote($uid, intParam(body(), 'id'));
+      $mine = (int)$note['user_id'] === $uid;
+      $moderator = $note['visibility'] === 'shared' && recipeRole($uid, (int)$note['recipe_id']) === 'co_owner';
+      if (!$mine && !$moderator) { fail('Only the person who wrote a note, or a co-owner, can remove it', 403); }
+      exec_('UPDATE sft_recipe_notes SET deleted_at = NOW() WHERE id = ?', 'i', [(int)$note['id']]);
+      if (!$mine) { audit($uid, 'note', (int)$note['id'], 'deleted', 'shared note by user ' . $note['user_id']); }
+      respond(['ok' => true]);
+    }
+
+    // ---- Tags (REQUIREMENTS.md §7) --------------------------------------------
+    // system: built-in, set by recipe editors · cookbook: belongs to a cookbook, set by its
+    // owners/editors, seen by its members · user: personal, seen and set only by its owner.
+
+    // Everything the user could put on this recipe, and what's on it now.
+    case 'tagChoices': {
+      $recipeId = intParam($_GET, 'recipeId');
+      requireViewRecipe($uid, $recipeId);
+      $on = array_flip(array_map(fn($r) => (int)$r['category_id'],
+        q('SELECT category_id FROM sft_recipe_categories WHERE recipe_id = ?', 'i', [$recipeId])));
+      $shape = fn($r) => ['id' => (int)$r['id'], 'name' => $r['name'], 'kind' => $r['kind'], 'on' => isset($on[(int)$r['id']])];
+      $books = q(
+        'SELECT c.id, c.title, m.role FROM sft_cookbook_recipes cr JOIN sft_cookbooks c ON c.id = cr.cookbook_id AND c.deleted_at IS NULL
+           JOIN sft_cookbook_members m ON m.cookbook_id = c.id AND m.user_id = ? WHERE cr.recipe_id = ? ORDER BY c.title', 'ii', [$uid, $recipeId]);
+      respond(['ok' => true,
+        'canEditBuiltIn' => canEditRecipe($uid, $recipeId),
+        'builtIn' => array_map($shape, q("SELECT id, name, kind FROM sft_categories WHERE scope = 'system'
+                                          ORDER BY FIELD(kind, 'category', 'method', 'descriptor'), id")),
+        'cookbooks' => array_map(fn($b) => [
+          'id' => (int)$b['id'], 'title' => $b['title'], 'canEdit' => in_array($b['role'], ['owner', 'editor'], true),
+          'tags' => array_map($shape, q("SELECT id, name, kind FROM sft_categories WHERE scope = 'cookbook' AND cookbook_id = ? ORDER BY name", 'i', [(int)$b['id']])),
+        ], $books),
+        'mine' => array_map($shape, q("SELECT id, name, kind FROM sft_categories WHERE scope = 'user' AND owner_user_id = ? ORDER BY name", 'i', [$uid])),
+      ]);
+    }
+
+    case 'setRecipeTag': {
+      requirePost();
+      $b = body();
+      $recipeId = intParam($b, 'recipeId');
+      requireViewRecipe($uid, $recipeId);
+      $tag = requireTagUse($uid, intParam($b, 'tagId'), $recipeId);
+      if (!empty($b['on'])) {
+        exec_('INSERT IGNORE INTO sft_recipe_categories (recipe_id, category_id, added_by) VALUES (?, ?, ?)', 'iii', [$recipeId, (int)$tag['id'], $uid]);
+      } else {
+        exec_('DELETE FROM sft_recipe_categories WHERE recipe_id = ? AND category_id = ?', 'ii', [$recipeId, (int)$tag['id']]);
+      }
+      respond(['ok' => true]);
+    }
+
+    // New personal tag, or a tag for one of the user's cookbooks. Same name (any capitals) in the
+    // same place → the existing tag is returned instead of a duplicate.
+    case 'createTag': {
+      requirePost();
+      $b = body();
+      $name = tagName((string)($b['name'] ?? ''));
+      $norm = normalizeName($name);
+      if (($b['scope'] ?? 'user') === 'cookbook') {
+        $cookbookId = intParam($b, 'cookbookId');
+        requireCookbookRole($uid, $cookbookId, ['owner', 'editor']);
+        $existing = q1("SELECT id, name FROM sft_categories WHERE scope = 'cookbook' AND cookbook_id = ? AND normalized_name = ?", 'is', [$cookbookId, $norm]);
+        $id = $existing ? (int)$existing['id'] : exec_("INSERT INTO sft_categories (name, normalized_name, kind, scope, cookbook_id) VALUES (?, ?, 'descriptor', 'cookbook', ?)",
+          'ssi', [$name, $norm, $cookbookId]);
+      } else {
+        $existing = q1("SELECT id, name FROM sft_categories WHERE scope = 'user' AND owner_user_id = ? AND normalized_name = ?", 'is', [$uid, $norm]);
+        $id = $existing ? (int)$existing['id'] : exec_("INSERT INTO sft_categories (name, normalized_name, kind, scope, owner_user_id) VALUES (?, ?, 'descriptor', 'user', ?)",
+          'ssi', [$name, $norm, $uid]);
+      }
+      respond(['ok' => true, 'tag' => ['id' => $id, 'name' => $existing ? $existing['name'] : $name], 'existed' => (bool)$existing]);
+    }
+
+    case 'renameTag': {
+      requirePost();
+      $b = body();
+      $tag = requireTagManage($uid, intParam($b, 'id'));
+      $name = tagName((string)($b['name'] ?? ''));
+      $norm = normalizeName($name);
+      $clash = q1('SELECT id FROM sft_categories WHERE scope = ? AND COALESCE(owner_user_id, 0) = ? AND COALESCE(cookbook_id, 0) = ?
+                   AND normalized_name = ? AND id <> ?', 'siisi',
+        [$tag['scope'], (int)$tag['owner_user_id'], (int)$tag['cookbook_id'], $norm, (int)$tag['id']]);
+      if ($clash) { fail('There\'s already a tag with that name', 409, 'name'); }
+      exec_('UPDATE sft_categories SET name = ?, normalized_name = ? WHERE id = ?', 'ssi', [$name, $norm, (int)$tag['id']]);
+      respond(['ok' => true]);
+    }
+
+    case 'deleteTag': {
+      requirePost();
+      $tag = requireTagManage($uid, intParam(body(), 'id'));
+      exec_('DELETE FROM sft_categories WHERE id = ?', 'i', [(int)$tag['id']]);   // links go with it (cascade)
+      respond(['ok' => true]);
+    }
+
+    // Tags people can filter a cookbook by: built-in, the cookbook's own, and the user's own.
+    case 'cookbookTags': {
+      $cookbookId = intParam($_GET, 'id');
+      $role = requireCookbookRole($uid, $cookbookId, ['owner', 'editor', 'viewer']);
+      $rows = q(
+        "SELECT c.id, c.name, c.scope, COUNT(*) AS n FROM sft_categories c
+           JOIN sft_recipe_categories rc ON rc.category_id = c.id
+           JOIN sft_cookbook_recipes cr ON cr.recipe_id = rc.recipe_id AND cr.cookbook_id = ?
+           JOIN sft_recipes r ON r.id = rc.recipe_id AND r.deleted_at IS NULL
+          WHERE c.scope = 'system' OR (c.scope = 'cookbook' AND c.cookbook_id = ?) OR (c.scope = 'user' AND c.owner_user_id = ?)
+          GROUP BY c.id, c.name, c.scope ORDER BY c.name", 'iii', [$cookbookId, $cookbookId, $uid]);
+      $unused = q("SELECT id, name FROM sft_categories WHERE scope = 'cookbook' AND cookbook_id = ? AND id NOT IN
+                    (SELECT category_id FROM sft_recipe_categories) ORDER BY name", 'i', [$cookbookId]);
+      respond(['ok' => true, 'canManage' => in_array($role, ['owner', 'editor'], true),
+        'tags' => array_map(fn($r) => ['id' => (int)$r['id'], 'name' => $r['name'], 'scope' => $r['scope'], 'count' => (int)$r['n']], $rows),
+        'unused' => array_map(fn($r) => ['id' => (int)$r['id'], 'name' => $r['name']], $unused)]);
     }
 
     // ---- Admin -------------------------------------------------------------
