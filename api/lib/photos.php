@@ -161,6 +161,25 @@ function editableRecipePhoto(int $userId, int $photoId): array {
   return $p;
 }
 
+/**
+ * Copies a recipe's photos (files and all) onto another recipe, in the same order, so removing a
+ * photo from one never touches the other. A photo whose file is missing is left out.
+ */
+function copyRecipePhotos(int $fromRecipeId, int $toRecipeId): void {
+  $rows = q('SELECT * FROM sft_recipe_photos WHERE recipe_id = ? AND deleted_at IS NULL ORDER BY position, id', 'i', [$fromRecipeId]);
+  if (!$rows || !defined('PHOTO_DIR')) { return; }
+  foreach ($rows as $p) {
+    $key = bin2hex(random_bytes(16));
+    if (!@copy(photoPath($p['storage_key'], 'full'), photoPath($key, 'full'))) { continue; }
+    if (!@copy(photoPath($p['storage_key'], 'thumb'), photoPath($key, 'thumb'))) { removePhotoFiles($key); continue; }
+    exec_('INSERT INTO sft_recipe_photos (recipe_id, storage_key, caption, is_cover, position, width, height, uploaded_by, uploaded_at)
+           VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?)', 'issiiiis',
+      [$toRecipeId, $key, $p['caption'], (int)$p['position'], $p['width'] !== null ? (int)$p['width'] : null,
+       $p['height'] !== null ? (int)$p['height'] : null, (int)$p['uploaded_by'], $p['uploaded_at']]);
+  }
+  tidyRecipePhotos($toRecipeId);
+}
+
 /** Positions 0..n-1 in the current order. The first photo is the cover. */
 function tidyRecipePhotos(int $recipeId): void {
   $rows = q('SELECT id FROM sft_recipe_photos WHERE recipe_id = ? AND deleted_at IS NULL ORDER BY position, id', 'i', [$recipeId]);

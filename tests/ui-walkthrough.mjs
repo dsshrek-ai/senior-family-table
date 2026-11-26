@@ -166,6 +166,21 @@ await step('add the recipe to a second cookbook from the recipe page', async () 
   await desk.locator('a', { hasText: 'Breads' }).first().waitFor();
 });
 
+await step('make a separate copy in another cookbook from the recipe page', async () => {
+  const id = new URL(desk.url()).searchParams.get('id');
+  await desk.selectOption('#copy-book', { label: 'Breads' });
+  await desk.screenshot({ path: `${SHOTS}/6b-copy.png`, fullPage: true });
+  await desk.click('#copy-book-btn');
+  // Breads already has this recipe (added above), so the copy is named "… (copy)".
+  await desk.getByRole('heading', { name: 'Grandma\'s Test Rolls (copy)' }).waitFor();
+  await desk.getByText('This is your copy').waitFor();
+  const copyId = new URL(desk.url()).searchParams.get('id');
+  assert.notEqual(copyId, id);
+  await desk.getByText('Use the dough cycle.').first().waitFor();   // the steps came along
+  await desk.goto(`${BASE}/recipe.html?id=${id}`);
+  await desk.getByRole('heading', { name: 'Grandma\'s Test Rolls', exact: true }).waitFor();
+});
+
 await step('share a cookbook by Hub email', async () => {
   await desk.goto(`${BASE}/share.html?type=cookbook&id=1`);
   await desk.fill('#who', 'nobody@test');

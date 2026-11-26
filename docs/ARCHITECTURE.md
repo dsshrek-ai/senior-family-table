@@ -110,6 +110,15 @@ visibleNotes(u, r)        = notes on r WHERE visibility = 'shared' OR author = u
 
 - `sft_recipes` is the master; `sft_cookbook_recipes` links it into cookbooks with a unique
   `(cookbook_id, recipe_id)` pair. Removing a link never touches the recipe.
+- **Two ways to put a recipe in another cookbook** (recipe page): *Also add to* links the same
+  recipe (one master — an edit shows in both). *Make a copy in* (`copyRecipe`, added
+  2026-11-26) makes a separate recipe: the copier is its only co-owner; ingredient lines are
+  copied row for row (original wording and catalog links kept); methods, steps and photos
+  (with their own files) come along; tags only if they're built-in, the copier's own, or the
+  target cookbook's. Family notes, stars, ratings, sharing and history stay with the
+  original — the copy starts at version 1, "Copied from …". Needs view rights on the recipe and
+  owner/editor on the target cookbook. A same-titled recipe already in that cookbook makes it
+  "… (copy)".
 - Ingredients (`sft_recipe_ingredients`), methods (`sft_recipe_methods`) and steps
   (`sft_recipe_steps`) are child rows. A step may belong to a method ("Instant Pot",
   "Slow Cooker"), or to no method (shared steps).

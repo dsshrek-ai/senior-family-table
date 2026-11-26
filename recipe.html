@@ -99,6 +99,7 @@ function render() {
   ].filter(Boolean);
   const inBooks = new Set(r.cookbooks.map(c => c.id));
   const addable = myBooks.filter(b => !inBooks.has(b.id) && (b.role === 'owner' || b.role === 'editor'));
+  const copyable = myBooks.filter(b => b.role === 'owner' || b.role === 'editor');
   const back = r.cookbooks.find(c => c.id === fromCookbook) || r.cookbooks[0];
 
   main.innerHTML = `
@@ -152,7 +153,12 @@ function render() {
         In your cookbooks: ${r.cookbooks.length ? r.cookbooks.map(c => `<a href="cookbook.html?id=${c.id}">${escapeHtml(c.title)}</a>`).join(', ') : '<span class="muted">none</span>'}</p>
       ${addable.length ? `<div class="toolbar" style="margin:0"><label for="add-book" style="margin:0">Also add to</label>
         <select id="add-book" style="width:auto;flex:1;min-width:160px">${addable.map(b => `<option value="${b.id}">${escapeHtml(b.title)}</option>`).join('')}</select>
-        <button type="button" class="btn small" id="add-book-btn">Add</button></div>` : ''}
+        <button type="button" class="btn small" id="add-book-btn">Add</button></div>
+        <p class="muted" style="margin:4px 0 0;font-size:0.9rem">Adds this same recipe — a change in one cookbook shows in both.</p>` : ''}
+      ${copyable.length ? `<div class="toolbar" style="margin:10px 0 0"><label for="copy-book" style="margin:0">Make a copy in</label>
+        <select id="copy-book" style="width:auto;flex:1;min-width:160px">${copyable.map(b => `<option value="${b.id}">${escapeHtml(b.title)}</option>`).join('')}</select>
+        <button type="button" class="btn small secondary" id="copy-book-btn">Copy</button></div>
+        <p class="muted" style="margin:4px 0 0;font-size:0.9rem">A separate recipe you can change without changing this one. Ingredients, steps, tags and photos come along; family notes and stars stay here.</p>` : ''}
       <p class="muted" style="margin:8px 0 0;font-size:0.9rem">Version ${r.version}${r.updatedBy ? ` · last changed by ${escapeHtml(r.updatedBy.name)} ${formatDateTime(r.updatedAt)}` : ''}</p>
     </section>`;
 
@@ -190,6 +196,23 @@ function render() {
         toast('Added');
         await load();
       } catch (e) { toast(e.message); }
+    });
+  }
+  const copyBtn = document.getElementById('copy-book-btn');
+  if (copyBtn) {
+    copyBtn.addEventListener('click', async () => {
+      const bookId = Number(document.getElementById('copy-book').value);
+      const book = myBooks.find(b => b.id === bookId);
+      const title = prompt(`Name for the copy in "${book.title}":`, r.title);
+      if (title === null) { return; }
+      copyBtn.disabled = true;
+      try {
+        const res = await apiPost('copyRecipe', { cookbookId: bookId, recipeId: r.id, title: title.trim() || r.title });
+        window.location.href = `recipe.html?id=${res.id}&cookbook=${bookId}&copied=1`;
+      } catch (e) {
+        copyBtn.disabled = false;
+        toast(e.message);
+      }
     });
   }
   const del = document.getElementById('del');
@@ -557,6 +580,10 @@ async function load() {
   scaleMode = r.me.savedScaleMode === 'batches' && r.yieldQuantity ? 'batches' : (r.servings ? 'servings' : (r.yieldQuantity ? 'batches' : 'servings'));
   scaleValue = r.me.savedScale && r.me.savedScaleMode === scaleMode ? r.me.savedScale : baseFor(scaleMode);
   render();
+  if (param('copied') && !load.toldCopied) {
+    load.toldCopied = true;
+    toast('This is your copy — change it any way you like');
+  }
 }
 
 load().catch(e => handleError(main, e));

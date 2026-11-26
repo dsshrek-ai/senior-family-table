@@ -457,6 +457,30 @@ try {
       respond(['ok' => true]);
     }
 
+    // A separate copy in one of the user's cookbooks (any recipe they can see). Editing either one
+    // never changes the other. If that cookbook already has a recipe with the same title and no
+    // new title is given, the copy is called "… (copy)".
+    case 'copyRecipe': {
+      requirePost();
+      $b = body();
+      $cookbookId = intParam($b, 'cookbookId');
+      $recipeId = intParam($b, 'recipeId');
+      requireViewRecipe($uid, $recipeId);
+      requireCookbookRole($uid, $cookbookId, ['owner', 'editor']);
+      $src = q1('SELECT title FROM sft_recipes WHERE id = ?', 'i', [$recipeId]);
+      $title = cleanText($b['title'] ?? null, 200, 'title') ?? $src['title'];
+      if ($title === $src['title'] && q1(
+        'SELECT 1 FROM sft_cookbook_recipes cr JOIN sft_recipes r ON r.id = cr.recipe_id AND r.deleted_at IS NULL
+          WHERE cr.cookbook_id = ? AND r.title_normalized = ?', 'is', [$cookbookId, mb_substr(normalizeTitle($title), 0, 200)])) {
+        $title = mb_substr($title, 0, 193) . ' (copy)';
+      }
+      db()->begin_transaction();
+      $id = copyRecipe($uid, $recipeId, $cookbookId, $title);
+      db()->commit();
+      audit($uid, 'recipe', $id, 'copied', "from recipe $recipeId into cookbook $cookbookId");
+      respond(['ok' => true, 'id' => $id, 'title' => $title]);
+    }
+
     // Remove from one cookbook only; the recipe and its other cookbooks are untouched.
     case 'unlinkRecipe': {
       requirePost();

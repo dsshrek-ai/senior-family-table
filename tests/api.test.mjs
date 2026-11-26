@@ -944,6 +944,85 @@ await test('note photos: only the author adds or removes them; a private note\'s
   assert.equal((await fetch(photoUrl(link))).status, 404);
 });
 
+// ---- Copy a recipe to another cookbook (a separate recipe) ----------------
+
+let soupCopy = 0;
+const copyBook = (await call('elaine', 'createCookbook', { body: { title: 'Elaine kitchen' } })).data.id;
+await test('copy: an exact, separate copy — same wording, steps and methods; the copier is its only co-owner', async () => {
+  const r = await call('elaine', 'copyRecipe', { body: { recipeId: soup, cookbookId: copyBook } });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  soupCopy = r.data.id;
+  assert.notEqual(soupCopy, soup);
+  const cols = 'position, section, original_text, quantity, unit, item_name, ingredient_id, preparation, is_optional';
+  assert.equal(sql(`SELECT ${cols} FROM sft_recipe_ingredients WHERE recipe_id = ${soupCopy} ORDER BY position`),
+    sql(`SELECT ${cols} FROM sft_recipe_ingredients WHERE recipe_id = ${soup} ORDER BY position`));
+  const steps = id => sql(`SELECT s.step_number, m.method_name, s.instruction FROM sft_recipe_steps s LEFT JOIN sft_recipe_methods m ON m.id = s.method_id
+                           WHERE s.recipe_id = ${id} ORDER BY s.id`);
+  assert.ok(steps(soup).length > 0);
+  assert.equal(steps(soupCopy), steps(soup));
+  const copy = (await call('elaine', 'getRecipe', { params: { id: soupCopy } })).data.recipe;
+  const orig = (await call('elaine', 'getRecipe', { params: { id: soup } })).data.recipe;
+  assert.equal(copy.title, orig.title);
+  assert.deepEqual([copy.servings, copy.source, copy.generalNotes], [orig.servings, orig.source, orig.generalNotes]);
+  assert.deepEqual(copy.cookbooks.map(c => c.id), [copyBook]);
+  assert.equal(copy.myRole, 'co_owner');
+  assert.equal(copy.version, 1);
+  assert.equal(sql(`SELECT GROUP_CONCAT(user_id) FROM sft_recipe_members WHERE recipe_id = ${soupCopy}`), String(elaineId));
+  assert.equal(sql(`SELECT change_note FROM sft_recipe_revisions WHERE recipe_id = ${soupCopy}`), `Copied from "${orig.title}"`);
+  assert.equal(sql(`SELECT COUNT(*) FROM sft_audit_events WHERE resource_type = 'recipe' AND resource_id = ${soupCopy} AND action = 'copied'`), '1');
+});
+await test('copy: changing the copy never changes the original (and the other way round)', async () => {
+  const copy = (await call('elaine', 'getRecipe', { params: { id: soupCopy } })).data.recipe;
+  const input = { ...copy, title: 'Elaine\'s Beans', ingredients: copy.ingredients.slice(1) };
+  const r = await call('elaine', 'saveRecipe', { body: { id: soupCopy, version: copy.version, recipe: input } });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  const orig = (await call('owner', 'getRecipe', { params: { id: soup } })).data.recipe;
+  assert.ok(orig.title.startsWith('Refried Beans with Lard'));
+  assert.equal(orig.ingredients.length, copy.ingredients.length);
+});
+await test('copy: into a cookbook that already has that title, it is called "… (copy)"; a new name can be given', async () => {
+  const r = await call('owner', 'copyRecipe', { body: { recipeId: soup, cookbookId: familyBook } });
+  const t = (await call('owner', 'getRecipe', { params: { id: r.data.id } })).data.recipe.title;
+  assert.match(t, /^Refried Beans with Lard.* \(copy\)$/);
+  const named = await call('owner', 'copyRecipe', { body: { recipeId: soup, cookbookId: familyBook, title: '  Beans, my way ' } });
+  assert.equal(named.data.title, 'Beans, my way');
+});
+await test('copy: built-in and my own tags come along; someone else\'s personal tags and other cookbooks\' tags do not', async () => {
+  const builtIn = Number(sql("SELECT id FROM sft_categories WHERE scope = 'system' ORDER BY id LIMIT 1"));
+  const ownerTag = (await call('owner', 'createTag', { body: { scope: 'user', name: 'Owner only' } })).data.tag.id;
+  const elaineTag = (await call('elaine', 'createTag', { body: { scope: 'user', name: 'Elaine faves' } })).data.tag.id;
+  const bookTag = (await call('owner', 'createTag', { body: { scope: 'cookbook', cookbookId: familyBook, name: 'Family book tag' } })).data.tag.id;
+  for (const [who, tagId] of [['elaine', builtIn], ['owner', ownerTag], ['elaine', elaineTag], ['owner', bookTag]]) {
+    assert.equal((await call(who, 'setRecipeTag', { body: { recipeId: photoRecipe, tagId, on: true } })).status, 200, `tag ${tagId}`);
+  }
+  const r = await call('elaine', 'copyRecipe', { body: { recipeId: photoRecipe, cookbookId: copyBook } });
+  const tags = sql(`SELECT category_id FROM sft_recipe_categories WHERE recipe_id = ${r.data.id} ORDER BY category_id`).split('\n').map(Number);
+  assert.deepEqual(tags, [builtIn, elaineTag].sort((a, b) => a - b));
+});
+await test('copy: photos come along with their own files — removing one from the copy leaves the original\'s', async () => {
+  const orig = (await call('elaine', 'getRecipe', { params: { id: photoRecipe } })).data.recipe;
+  const r = await call('elaine', 'copyRecipe', { body: { recipeId: photoRecipe, cookbookId: copyBook, title: 'Pie copy' } });
+  const copy = (await call('elaine', 'getRecipe', { params: { id: r.data.id } })).data.recipe;
+  assert.equal(copy.photos.length, orig.photos.length);
+  assert.ok(copy.photos.length >= 2);
+  assert.deepEqual(copy.photos.map(p => [p.caption, p.isCover, p.width]), orig.photos.map(p => [p.caption, p.isCover, p.width]));
+  assert.equal(sql(`SELECT COUNT(*) FROM sft_recipe_photos a JOIN sft_recipe_photos b ON a.storage_key = b.storage_key
+                    WHERE a.recipe_id = ${photoRecipe} AND b.recipe_id = ${r.data.id}`), '0', 'no shared files');
+  assert.equal((await fetch(photoUrl(copy.photos[0].full))).status, 200);
+  assert.equal((await call('elaine', 'deletePhoto', { body: { id: copy.photos[0].id } })).status, 200);
+  assert.equal((await fetch(photoUrl(orig.photos[0].full))).status, 200, 'original photo still served');
+  assert.equal(copy.notes.length, 0, 'family notes stay with the original');
+  assert.equal(copy.me.favorite, false);
+});
+await test('copy: only from a recipe you can see, only into a cookbook you can edit', async () => {
+  assert.equal((await call('outsider', 'copyRecipe', { body: { recipeId: soup, cookbookId: familyBook } })).status, 404);
+  const outsiderBook = (await call('outsider', 'createCookbook', { body: { title: 'Outsider book' } })).data.id;
+  assert.equal((await call('outsider', 'copyRecipe', { body: { recipeId: soup, cookbookId: outsiderBook } })).status, 404, 'cannot see the recipe');
+  assert.equal((await call('elaine', 'copyRecipe', { body: { recipeId: soup, cookbookId: outsiderBook } })).status, 404, 'not her cookbook');
+  await call('outsider', 'addCookbookMember', { body: { cookbookId: outsiderBook, username: 'elaine@test', role: 'viewer' } });
+  assert.equal((await call('elaine', 'copyRecipe', { body: { recipeId: soup, cookbookId: outsiderBook } })).status, 403, 'viewer only');
+});
+
 // ---- Admin import ----------------------------------------------------------
 
 await test('only a Hub admin can run the import', async () => {

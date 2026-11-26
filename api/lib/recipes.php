@@ -304,6 +304,55 @@ function matchCatalogIngredientForRecipe(int $recipeId, string $itemName): ?int 
   return $row ? (int)$row['ingredient_id'] : null;
 }
 
+/**
+ * A separate copy of recipe $sourceId in $cookbookId, co-owned by $userId (and nobody else).
+ * Copies the recipe exactly as it reads now -- ingredient lines keep their original wording and
+ * catalog links, methods and steps keep their order. Tags: built-in ones, the copier's own, and
+ * the target cookbook's. Photos get their own files. Not copied: family notes, stars and other
+ * personal data, sharing, and the history (the copy starts at version 1). Returns the new id.
+ */
+function copyRecipe(int $userId, int $sourceId, int $cookbookId, string $title): int {
+  $src = q1('SELECT * FROM sft_recipes WHERE id = ? AND deleted_at IS NULL', 'i', [$sourceId]);
+  if (!$src) { notFound('Recipe'); }
+  $id = exec_(
+    'INSERT INTO sft_recipes (title, title_normalized, description, servings, yield_quantity, yield_unit, prep_minutes,
+       cook_minutes, total_minutes, source_text, general_notes, created_by, updated_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    'sssddsiiissii',
+    [$title, mb_substr(normalizeTitle($title), 0, 200), $src['description'], nullableFloat($src['servings']),
+     nullableFloat($src['yield_quantity']), $src['yield_unit'], nullableInt($src['prep_minutes']), nullableInt($src['cook_minutes']),
+     nullableInt($src['total_minutes']), $src['source_text'], $src['general_notes'], $userId, $userId]
+  );
+  exec_("INSERT INTO sft_recipe_members (recipe_id, user_id, role, added_by) VALUES (?, ?, 'co_owner', ?)", 'iii', [$id, $userId, $userId]);
+  exec_('INSERT INTO sft_cookbook_recipes (cookbook_id, recipe_id, added_by) VALUES (?, ?, ?)', 'iii', [$cookbookId, $id, $userId]);
+
+  exec_('INSERT INTO sft_recipe_ingredients (recipe_id, position, section, original_text, quantity, quantity_max, unit,
+           unit_dimension, package_qualifier, item_name, ingredient_id, preparation, is_optional)
+         SELECT ?, position, section, original_text, quantity, quantity_max, unit,
+           unit_dimension, package_qualifier, item_name, ingredient_id, preparation, is_optional
+           FROM sft_recipe_ingredients WHERE recipe_id = ? ORDER BY position, id', 'ii', [$id, $sourceId]);
+  $methodMap = [];
+  foreach (q('SELECT id, method_name, sequence FROM sft_recipe_methods WHERE recipe_id = ? ORDER BY sequence, id', 'i', [$sourceId]) as $m) {
+    $methodMap[(int)$m['id']] = exec_('INSERT INTO sft_recipe_methods (recipe_id, method_name, sequence) VALUES (?, ?, ?)',
+      'isi', [$id, $m['method_name'], (int)$m['sequence']]);
+  }
+  foreach (q('SELECT method_id, step_number, instruction FROM sft_recipe_steps WHERE recipe_id = ? ORDER BY id', 'i', [$sourceId]) as $s) {
+    $methodId = $s['method_id'] !== null ? ($methodMap[(int)$s['method_id']] ?? null) : null;
+    exec_('INSERT INTO sft_recipe_steps (recipe_id, method_id, step_number, instruction) VALUES (?, ?, ?, ?)',
+      'iiis', [$id, $methodId, (int)$s['step_number'], $s['instruction']]);
+  }
+
+  exec_("INSERT INTO sft_recipe_categories (recipe_id, category_id, added_by)
+         SELECT ?, rc.category_id, ? FROM sft_recipe_categories rc JOIN sft_categories c ON c.id = rc.category_id
+          WHERE rc.recipe_id = ? AND (c.scope = 'system' OR (c.scope = 'user' AND c.owner_user_id = ?)
+                                      OR (c.scope = 'cookbook' AND c.cookbook_id = ?))",
+    'iiiii', [$id, $userId, $sourceId, $userId, $cookbookId]);
+
+  copyRecipePhotos($sourceId, $id);
+  writeRevision($id, 1, $userId, mb_substr('Copied from "' . $src['title'] . '"', 0, 255));
+  return $id;
+}
+
 /** Turns a stored snapshot back into editor input, keeping row ids so links survive. */
 function snapshotToInput(array $snap): array {
   $methods = array_map(fn($m) => ['id' => $m['id'] ?? null, 'key' => 'm' . ($m['id'] ?? ''), 'name' => $m['name']], $snap['methods'] ?? []);

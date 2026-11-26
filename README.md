@@ -8,7 +8,8 @@ synced between devices.
 No meal planner, by design.
 
 > **Status:** Live. Recipe library, scaling, shopping lists (Senior Family Cookbook style, shared
-> and synced), family notes, tags, Send as PDF, Paste a recipe, and photos are built and tested.
+> and synced), family notes, tags, Send as PDF, Paste a recipe, photos, and copying a recipe to
+> another cookbook are built and tested.
 > Next: ingredient catalog.
 
 | File | What it is |
